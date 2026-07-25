@@ -424,6 +424,11 @@ void ControlServer::broadcast_loop() {
     auto next_tick = clock::now() + period;
 
     while (running_.load(std::memory_order_acquire)) {
+        // Guard the entire tick: an exception escaping this thread would call
+        // std::terminate() and take the whole audio process down mid-show.
+        // Log-and-continue instead so a transient fault (e.g. a flaky media
+        // share throwing out of a filesystem call) just drops one meter frame.
+        try {
 
         // Build the meters payload.
         json payload;
@@ -580,6 +585,16 @@ void ControlServer::broadcast_loop() {
         std::this_thread::sleep_until(next_tick);
         next_tick += period;
         if (next_tick < clock::now()) next_tick = clock::now() + period;
+
+        } catch (const std::exception& e) {
+            Logger::error("broadcast_loop: unhandled exception (continuing): {}", e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            next_tick = clock::now() + period;
+        } catch (...) {
+            Logger::error("broadcast_loop: unknown exception (continuing).");
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            next_tick = clock::now() + period;
+        }
     }
 }
 
@@ -619,18 +634,23 @@ void ControlServer::waveform_worker() {
             impl_->waveform_q.pop_front();
         }
 
+        // Guard the whole task: an exception here (e.g. the throwing fs::exists
+        // overload faulting on a disconnected network share, or compute_waveform
+        // throwing) would escape this thread and std::terminate() the process.
+        try {
+
+        std::error_code fs_ec;
         const fs::path json_file = task.waveforms_dir.empty()
             ? fs::path{}
             : task.waveforms_dir / (task.item_uuid + ".json");
 
         // Remove stale cache entry when a forced regeneration is requested.
-        if (task.force && !json_file.empty() && fs::exists(json_file)) {
-            std::error_code ec;
-            fs::remove(json_file, ec);
+        if (task.force && !json_file.empty() && fs::exists(json_file, fs_ec)) {
+            fs::remove(json_file, fs_ec);
         }
 
         // Serve from disk cache when available (skips full audio decode).
-        if (!json_file.empty() && fs::exists(json_file)) {
+        if (!json_file.empty() && fs::exists(json_file, fs_ec)) {
             try {
                 std::ifstream cache_f(json_file);
                 const auto cached = json::parse(cache_f);
@@ -700,6 +720,12 @@ void ControlServer::waveform_worker() {
 
         broadcast_doc_patch(std::move(patch));
         Logger::info("waveform_worker: done for item_uuid '{}'", task.item_uuid);
+
+        } catch (const std::exception& e) {
+            Logger::error("waveform_worker: unhandled exception (skipping task): {}", e.what());
+        } catch (...) {
+            Logger::error("waveform_worker: unknown exception (skipping task).");
+        }
     }
 }
 

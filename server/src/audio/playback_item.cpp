@@ -528,10 +528,13 @@ std::size_t PlaybackItem::render_block(Sample* const* out_channel_buffers,
             static_cast<long long>(playhead_frames_.load(std::memory_order_relaxed));
         const auto playhead_ns = std::chrono::nanoseconds{
             playhead_frames * 1'000'000'000LL / static_cast<long long>(desc_.mix_sample_rate)};
-        // Refresh offset in case the control thread changed it.
-        ltc_->configure(desc_.mix_sample_rate, desc_.ltc_frame_rate,
-                        std::chrono::nanoseconds{ltc_offset_ns_.load(std::memory_order_acquire)},
-                        /*amplitude*/ 0.5f);
+        // Refresh offset in case the control thread changed it. Use set_offset()
+        // — NOT configure() — so we don't reset the encoder state every block
+        // (that would force polarity back to +1 each block and corrupt the
+        // biphase-mark signal). Sample-rate / frame-rate / enable changes go
+        // through configure() from their dedicated setters instead.
+        ltc_->set_offset(
+            std::chrono::nanoseconds{ltc_offset_ns_.load(std::memory_order_acquire)});
         ltc_->render_block(out_channel_buffers[file_channels_], frame_count, playhead_ns);
     }
 
