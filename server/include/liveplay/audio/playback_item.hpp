@@ -109,8 +109,17 @@ public:
 
     // ---- Mutators --------------------------------------------------------
     void set_gain_db(float db) noexcept;
-    void set_fade_in (std::chrono::milliseconds d) noexcept { desc_.fade_in_duration  = d; }
-    void set_fade_out(std::chrono::milliseconds d) noexcept { desc_.fade_out_duration = d; }
+    // Fade durations are mirrored into atomics so the audio thread can read the
+    // fade-out length without racing these control-thread writes (desc_ keeps a
+    // copy for serialization and control-thread reads).
+    void set_fade_in (std::chrono::milliseconds d) noexcept {
+        desc_.fade_in_duration  = d;
+        fade_in_ms_.store(d.count(), std::memory_order_release);
+    }
+    void set_fade_out(std::chrono::milliseconds d) noexcept {
+        desc_.fade_out_duration = d;
+        fade_out_ms_.store(d.count(), std::memory_order_release);
+    }
     void set_ltc_enabled(bool enabled);
     void set_ltc_frame_rate(LTCFrameRate fr);
     void set_ltc_offset(std::chrono::nanoseconds offset) noexcept;
@@ -172,6 +181,17 @@ public:
     ChannelCount     source_channel_count() const noexcept;  // includes LTC if enabled
     PlaybackItemStats stats() const noexcept;
 
+    // True if the decoder returned an unexpected error mid-playback (i.e. not a
+    // clean end-of-file) since the flag was last cleared — e.g. a file dropping
+    // off a flaky network/USB drive. Lets the control thread surface a warning
+    // without any logging on the audio path. clear_decode_error() resets it.
+    bool had_decode_error() const noexcept {
+        return decode_error_.load(std::memory_order_relaxed);
+    }
+    void clear_decode_error() noexcept {
+        decode_error_.store(false, std::memory_order_relaxed);
+    }
+
     MeterSnapshot source_meter(ChannelIndex ch) const noexcept;
     // Consuming read (resets the channel's max-since-read). Broadcaster only.
     MeterSnapshot source_meter_consume(ChannelIndex ch) noexcept;
@@ -197,8 +217,14 @@ private:
     // grabs a try_lock and falls back to silence on contention (rare).
     std::unique_ptr<ma_decoder> decoder_;
     std::mutex                  decoder_mutex_;
-    bool                        decoder_ready_ = false;
+    std::atomic<bool>           decoder_ready_{false};
     ChannelCount                file_channels_ = 0;
+
+    // Interleaved decode staging buffer. Sized in load(); only touched inside
+    // the decoder_mutex_-guarded region of render_block(), so keeping it as a
+    // member (rather than a thread_local that reallocates on the audio thread's
+    // first block) moves the allocation to load() on the control thread.
+    std::vector<Sample>         interleave_buf_;
 
     // Transport + gain state (hot atomics).
     std::atomic<TransportState> transport_{TransportState::Stopped};
@@ -210,6 +236,14 @@ private:
     std::atomic<float>          fade_end_linear_{1.0f};
     std::atomic<long long>      fade_duration_samples_{0};
     std::atomic<long long>      fade_elapsed_samples_{0};
+
+    // Atomic mirrors of desc_.fade_in/out_duration (in ms) for lock-free reads
+    // from the audio thread. Written by set_fade_in()/set_fade_out().
+    std::atomic<long long>      fade_in_ms_{0};
+    std::atomic<long long>      fade_out_ms_{0};
+
+    // Set by render_block() on an unexpected decoder error (see had_decode_error).
+    std::atomic<bool>           decode_error_{false};
 
     // Playhead in mix-rate frames. Audio thread is the only writer.
     std::atomic<std::uint64_t>  playhead_frames_{0};
