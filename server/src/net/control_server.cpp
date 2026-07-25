@@ -277,11 +277,19 @@ static void register_download_token(const std::string& token, fs::path path) {
 
 static std::optional<fs::path> redeem_download_token(const std::string& token) {
     std::lock_guard lock{g_download_tokens_mutex};
-    // GC any expired entries while we're here.
+    // GC any expired entries while we're here. An expired-and-unclaimed token
+    // still has its .lpa sitting on disk (redeem is the only path that deletes
+    // it), so remove the file before dropping the entry — otherwise abandoned
+    // exports leak temp files indefinitely.
     const auto now = std::chrono::steady_clock::now();
     for (auto it = g_download_tokens.begin(); it != g_download_tokens.end();) {
-        if (it->second.expires_at <= now) it = g_download_tokens.erase(it);
-        else ++it;
+        if (it->second.expires_at <= now) {
+            std::error_code ec;
+            fs::remove(it->second.path, ec);
+            it = g_download_tokens.erase(it);
+        } else {
+            ++it;
+        }
     }
     auto it = g_download_tokens.find(token);
     if (it == g_download_tokens.end()) return std::nullopt;
@@ -831,9 +839,15 @@ static std::string handle_ws_message(crow::websocket::connection& conn,
                                      cue->value);
                     if (type == "pause") pi->pause();
                     else                 pi->resume();
+                } else {
+                    Logger::warn("WS {}: cue_id={} not live in engine", type, cue->value);
+                    return json({{"type", "error"},
+                                 {"message", type + ": cue not loaded into engine"}}).dump();
                 }
             } else {
                 Logger::warn("WS {}: no valid cue target", type);
+                return json({{"type", "error"},
+                             {"message", type + ": no valid cue target"}}).dump();
             }
         }
         else if (type == "stop_all") {
@@ -885,7 +899,15 @@ static std::string handle_ws_message(crow::websocket::connection& conn,
                 Logger::playback("SEEK {:.2f}s → cue_id={}", secs, cue->value);
                 if (auto* pi = engine.find_cue(*cue)) {
                     pi->seek_seconds(secs);
+                } else {
+                    Logger::warn("WS seek: cue_id={} not live in engine", cue->value);
+                    return json({{"type", "error"},
+                                 {"message", "seek: cue not loaded into engine"}}).dump();
                 }
+            } else {
+                Logger::warn("WS seek: no valid cue target");
+                return json({{"type", "error"},
+                             {"message", "seek: no valid cue target"}}).dump();
             }
         }
         else if (type == "set_next_item") {
@@ -931,6 +953,25 @@ void ControlServer::install_routes() {
     static CrowLogBridge crow_log_bridge;
     crow::logger::setHandler(&crow_log_bridge);
     crow::logger::setLogLevel(crow::LogLevel::Warning);
+
+    // Central exception handler: any route that throws past its own try/catch
+    // (or has none) lands here instead of Crow's bare 500. Crow invokes this
+    // from inside a catch(...) block, so a `throw;` re-raises the active
+    // exception, letting us recover its message. We reply with the same JSON +
+    // CORS shape as json_err() so browser clients never see an opaque,
+    // CORS-less 500.
+    app.exception_handler([](crow::response& res){
+        std::string message = "internal server error";
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            message = e.what();
+            Logger::error("Uncaught exception in route handler: {}", e.what());
+        } catch (...) {
+            Logger::error("Uncaught non-std exception in route handler.");
+        }
+        res = json_err(500, message);
+    });
 
     // Permissive CORS preflight for everything (the Electron client is on a
     // different origin).
@@ -1033,17 +1074,22 @@ void ControlServer::install_routes() {
 
     CROW_ROUTE(app, "/api/cues/<string>").methods(crow::HTTPMethod::Delete)
         ([this](std::string id) {
+            // remove_cue() returns void, so probe existence first and 404 if
+            // the target cue is unknown (mirrors the item play/stop routes).
+            if (!state_.find_cue(audio::CueId{id})) return json_err(404, "not found");
             state_.remove_cue(audio::CueId{id});
             return json_ok(json({{"ok", true}}));
         });
 
     CROW_ROUTE(app, "/api/cues/<string>/play").methods(crow::HTTPMethod::Post)
         ([this](std::string id) {
+            if (!engine_.find_cue(audio::CueId{id})) return json_err(404, "not found");
             engine_.play(audio::CueId{id});
             return json_ok(json({{"ok", true}}));
         });
     CROW_ROUTE(app, "/api/cues/<string>/stop").methods(crow::HTTPMethod::Post)
         ([this](std::string id) {
+            if (!engine_.find_cue(audio::CueId{id})) return json_err(404, "not found");
             engine_.stop(audio::CueId{id});
             return json_ok(json({{"ok", true}}));
         });
@@ -1307,6 +1353,9 @@ void ControlServer::install_routes() {
 
     CROW_ROUTE(app, "/api/mixers/<string>").methods(crow::HTTPMethod::Delete)
         ([this](std::string id){
+            // remove_mixer_channel() returns void; probe first and 404 if absent.
+            if (!engine_.find_mixer_channel(audio::MixerChannelId{id}))
+                return json_err(404, "not found");
             engine_.remove_mixer_channel(audio::MixerChannelId{id});
             return json_ok(json({{"ok", true}}));
         });
@@ -2016,27 +2065,36 @@ void ControlServer::install_routes() {
     // a temp dir server-side.
     CROW_ROUTE(app, "/api/file/download").methods(crow::HTTPMethod::Get)
         ([this](const crow::request& req){
-            const char* token = req.url_params.get("token");
-            if (!token) return json_err(400, "missing ?token=");
-            auto path_opt = redeem_download_token(token);
-            if (!path_opt) return json_err(404, "token expired or invalid");
-            const fs::path& p = *path_opt;
-            std::ifstream f{p, std::ios::binary | std::ios::ate};
-            if (!f) return json_err(500, "failed to open archive");
-            const auto size = f.tellg();
-            f.seekg(0, std::ios::beg);
-            std::string body(static_cast<std::size_t>(size), '\0');
-            f.read(body.data(), size);
+            try {
+                const char* token = req.url_params.get("token");
+                if (!token) return json_err(400, "missing ?token=");
+                auto path_opt = redeem_download_token(token);
+                if (!path_opt) return json_err(404, "token expired or invalid");
+                const fs::path& p = *path_opt;
+                std::ifstream f{p, std::ios::binary | std::ios::ate};
+                if (!f) return json_err(500, "failed to open archive");
+                const auto size = f.tellg();
+                f.seekg(0, std::ios::beg);
+                std::string body(static_cast<std::size_t>(size), '\0');
+                f.read(body.data(), size);
 
-            crow::response r{200, std::move(body)};
-            r.add_header("Content-Type", "application/octet-stream");
-            r.add_header("Content-Disposition",
-                         "attachment; filename=\"" + p.filename().string() + "\"");
-            r.add_header("Access-Control-Allow-Origin", "*");
-            // The temp file has served its purpose; delete it to bound disk
-            // usage on the server.
-            std::error_code ec; fs::remove(p, ec);
-            return r;
+                crow::response r{200, std::move(body)};
+                r.add_header("Content-Type", "application/octet-stream");
+                // Encode the filename via path_to_utf8 rather than the native
+                // .string() (which decodes through the active code page and can
+                // throw on non-representable Unicode names).
+                r.add_header("Content-Disposition",
+                             "attachment; filename=\""
+                                 + liveplay::util::path_to_utf8(p.filename()) + "\"");
+                r.add_header("Access-Control-Allow-Origin", "*");
+                // The temp file has served its purpose; delete it to bound disk
+                // usage on the server.
+                std::error_code ec; fs::remove(p, ec);
+                return r;
+            } catch (const std::exception& e) {
+                Logger::error("GET /api/file/download threw: {}", e.what());
+                return json_err(400, e.what());
+            }
         });
 
     // Import a .lpa archive that the client uploaded via multipart, OR an
@@ -2529,7 +2587,11 @@ void ControlServer::install_routes() {
         ([this](const crow::request& req, int slot){
             Logger::api_request("Client ({}) -> Server ({}) : DELETE /api/project/cart/{}",
                                 req.remote_ip_address, impl_->server_addr, slot);
-            state_.clear_cart_slot(slot);
+            // clear_cart_slot() returns false when the slot held no binding.
+            if (!state_.clear_cart_slot(slot)) {
+                Logger::warn("DELETE /api/project/cart/{} — no binding at slot", slot);
+                return json_err(404, "no binding at slot");
+            }
             Logger::api_response("Client ({}) <- Server ({}) : DELETE /api/project/cart/{} OK",
                                  req.remote_ip_address, impl_->server_addr, slot);
             broadcast_doc_patch(json{
