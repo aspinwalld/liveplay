@@ -23,6 +23,20 @@ inline std::string id_to_string(const audio::CueId& id)          { return id.val
 inline std::string id_to_string(const audio::MixerChannelId& id) { return id.value; }
 inline std::string id_to_string(const audio::DeviceId& id)       { return id.value; }
 
+// Type-safe JSON field read. Unlike nlohmann's .value<T>()/.at().get<T>(),
+// this never throws on a wrong-typed (or null) field — it returns `def`
+// instead. Malformed project fields (e.g. a number where a string is
+// expected) would otherwise throw nlohmann::type_error uncaught through the
+// network layer. (#5)
+template <class T>
+T json_get_or(const nlohmann::json& j, const char* key, const T& def) noexcept {
+    try {
+        if (auto it = j.find(key); it != j.end() && !it->is_null())
+            return it->get<T>();
+    } catch (...) {}
+    return def;
+}
+
 // Convert a Unix timestamp (seconds since epoch) to an ISO 8601 UTC string.
 inline std::string unix_ts_to_iso(std::int64_t unix_sec) {
     const std::time_t t = static_cast<std::time_t>(unix_sec);
@@ -1389,12 +1403,6 @@ bool ProjectState::save(const std::filesystem::path& path) const {
     // engine state) live on the side and don't get written to disk here;
     // they're rebuilt from the document on next load.
     try {
-        std::ofstream f{path};
-        if (!f) {
-            Logger::error("ProjectState::save: cannot open '{}' for writing",
-                          util::path_to_utf8(path));
-            return false;
-        }
         json doc;
         {
             std::lock_guard lock{mutex_};
@@ -1405,7 +1413,44 @@ bool ProjectState::save(const std::filesystem::path& path) const {
         // folder, so the saved file stays portable across moves. Covers items
         // imported this session (which carry an absolute mediaServerPath).
         relativize_media_paths(doc);
-        f << doc.dump(2);
+
+        // Atomic write: serialise to a sibling temp file, verify the stream is
+        // healthy, then rename it over the target. A write error, disk-full, or
+        // crash therefore never truncates or corrupts the previous good file —
+        // the documented "preserve previous state on failure" contract. (#5)
+        std::filesystem::path tmp = path;
+        tmp += ".tmp";
+        {
+            std::ofstream f{tmp, std::ios::binary | std::ios::trunc};
+            if (!f) {
+                Logger::error("ProjectState::save: cannot open '{}' for writing",
+                              util::path_to_utf8(tmp));
+                return false;
+            }
+            f << doc.dump(2);
+            f.flush();
+            f.close();
+            if (!f.good()) {
+                Logger::error("ProjectState::save: failed writing '{}' — "
+                              "previous file left untouched",
+                              util::path_to_utf8(tmp));
+                std::error_code rm_ec;
+                std::filesystem::remove(tmp, rm_ec);
+                return false;
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            Logger::error("ProjectState::save: rename '{}' -> '{}' failed: {} — "
+                          "previous file left untouched",
+                          util::path_to_utf8(tmp), util::path_to_utf8(path),
+                          ec.message());
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp, rm_ec);
+            return false;
+        }
         return true;
     } catch (const std::exception& ex) {
         Logger::error("ProjectState::save failed: {}", ex.what());
@@ -1773,16 +1818,16 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
                 have_seq_cue  = true;
                 seq_cue       = cit->second;
                 const json& it = *updated_item;
-                seq_in_point  = it.value("inPoint",  0.0);
-                seq_out_point = it.value("outPoint", 0.0);
-                seq_crossfade = it.value("crossFade", 0.0);
-                seq_stop_fade = it.value("stopFade",  0.0);
-                seq_sn_enabled   = it.value("startNextEnabled", false);
-                seq_sn_time      = it.value("startNextTime",    0.0);
-                seq_sn_fade_out  = it.value("startNextFadeOut", false);
-                seq_fade_out_dur = it.value("fadeOutDuration",  1.0);
+                seq_in_point  = json_get_or(it, "inPoint",  0.0);
+                seq_out_point = json_get_or(it, "outPoint", 0.0);
+                seq_crossfade = json_get_or(it, "crossFade", 0.0);
+                seq_stop_fade = json_get_or(it, "stopFade",  0.0);
+                seq_sn_enabled   = json_get_or(it, "startNextEnabled", false);
+                seq_sn_time      = json_get_or(it, "startNextTime",    0.0);
+                seq_sn_fade_out  = json_get_or(it, "startNextFadeOut", false);
+                seq_fade_out_dur = json_get_or(it, "fadeOutDuration",  1.0);
                 if (it.contains("endBehavior") && it["endBehavior"].is_object())
-                    seq_end_action = it["endBehavior"].value("action", std::string{});
+                    seq_end_action = json_get_or(it["endBehavior"], "action", std::string{});
                 auto cm_it = cues_.find(cit->second.value);
                 if (cm_it != cues_.end())
                     seq_file_duration = cm_it->second.duration_seconds;
@@ -2071,6 +2116,9 @@ std::string ProjectState::item_uuid_by_index(const std::vector<int>& path) const
 bool ProjectState::play_item(const std::string& uuid,
                              double fade_in_override_sec,
                              const audio::CueId& exclude_from_ducking) {
+  // Guard the whole body: a malformed item field must never throw uncaught
+  // into the network layer. (#5)
+  try {
     // Snapshot everything we need under the lock, then release before
     // touching the engine (engine calls take their own locks).
     std::string  ducking_mode  = "stop-all";
@@ -2117,14 +2165,14 @@ bool ProjectState::play_item(const std::string& uuid,
         if (!found && doc.contains("cartOnlyItems")) walk(doc["cartOnlyItems"]);
 
         if (found) {
-            in_point      = found->value("inPoint",         0.0);
-            out_point     = found->value("outPoint",         0.0);
-            fade_out_dur  = found->value("fadeOutDuration",  1.0);
-            crossfade_sec = found->value("crossFade",        0.0);
-            stop_fade_sec = found->value("stopFade",         0.0);
-            start_next_enabled  = found->value("startNextEnabled",  false);
-            start_next_time     = found->value("startNextTime",     0.0);
-            start_next_fade_out = found->value("startNextFadeOut",  false);
+            in_point      = json_get_or(*found, "inPoint",         0.0);
+            out_point     = json_get_or(*found, "outPoint",         0.0);
+            fade_out_dur  = json_get_or(*found, "fadeOutDuration",  1.0);
+            crossfade_sec = json_get_or(*found, "crossFade",        0.0);
+            stop_fade_sec = json_get_or(*found, "stopFade",         0.0);
+            start_next_enabled  = json_get_or(*found, "startNextEnabled",  false);
+            start_next_time     = json_get_or(*found, "startNextTime",     0.0);
+            start_next_fade_out = json_get_or(*found, "startNextFadeOut",  false);
             if (found->contains("duckingBehavior") &&
                 (*found)["duckingBehavior"].is_object()) {
                 const auto& dk = (*found)["duckingBehavior"];
@@ -2351,6 +2399,10 @@ bool ProjectState::play_item(const std::string& uuid,
     }
 
     return true;
+  } catch (const std::exception& e) {
+    Logger::error("ProjectState::play_item('{}') failed: {}", uuid, e.what());
+    return false;
+  }
 }
 
 bool ProjectState::stop_item(const std::string& uuid) {
@@ -2693,6 +2745,9 @@ std::string ProjectState::cart_slot_item_uuid(int slot) const {
 bool ProjectState::trigger_item(const std::string& uuid,
                                 double fade_in_override_sec,
                                 const audio::CueId& exclude_from_ducking) {
+  // Guard the whole body: a malformed item field must never throw uncaught
+  // into the network layer. (#5)
+  try {
     // Look up the item's type and (for groups) startBehavior + children.
     std::string type;
     std::string start_action;
@@ -2752,6 +2807,10 @@ bool ProjectState::trigger_item(const std::string& uuid,
         return trigger_item(child_uuids.front(), fade_in_override_sec, exclude_from_ducking);
     }
     return false;
+  } catch (const std::exception& e) {
+    Logger::error("ProjectState::trigger_item('{}') failed: {}", uuid, e.what());
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2781,6 +2840,26 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
     audio::MasterChannelIndex master_r;
     {
         std::lock_guard lock{mutex_};
+        // Bound-check master allocation. Each distinct device override consumes
+        // a pair of master channels growing upward from next_override_master_,
+        // while the top two channels of the bus are reserved for preview
+        // (kPreviewMasterL/R). Never allocate into or past that reserve — doing
+        // so would collide with preview output or run past the engine's master
+        // bus width. Compute the reserved base from the live bus width rather
+        // than trusting the 30/31 literals. (#5)
+        const audio::MasterChannelIndex bus_width =
+            engine_.config().master_channels;
+        const audio::MasterChannelIndex reserved_base =
+            (bus_width >= 2) ? static_cast<audio::MasterChannelIndex>(bus_width - 2)
+                             : 0;
+        if (next_override_master_ + 1 >= reserved_base) {
+            Logger::error(
+                "ensure_device_routing: out of master channels for '{}' "
+                "(next={}, reserved_base={}, bus_width={}); item will use "
+                "default routing instead of a dedicated device master",
+                device_name, next_override_master_, reserved_base, bus_width);
+            return {};
+        }
         master_l = next_override_master_;
         master_r = next_override_master_ + 1;
         next_override_master_ += 2;
@@ -3419,13 +3498,18 @@ void ProjectState::apply_to_engine_locked() {
     for (auto& [_, c] : cues_) {
         const auto id = engine_.load_cue(c.file_path, c.id);
         if (!id.empty()) {
-            engine_.find_cue(id)->set_gain_db(c.gain_db);
-            engine_.find_cue(id)->set_fade_in (c.fade_in_ms);
-            engine_.find_cue(id)->set_fade_out(c.fade_out_ms);
+            // Cache the lookup once and null-check it — find_cue can return
+            // null (e.g. the load raced with an unload) and the previous code
+            // dereferenced it up to six times unchecked. (#5)
+            auto* cue = engine_.find_cue(id);
+            if (!cue) continue;
+            cue->set_gain_db(c.gain_db);
+            cue->set_fade_in (c.fade_in_ms);
+            cue->set_fade_out(c.fade_out_ms);
             if (c.ltc_enabled) {
-                engine_.find_cue(id)->set_ltc_enabled(true);
-                engine_.find_cue(id)->set_ltc_frame_rate(fps_index_to_rate(c.ltc_frame_rate_index));
-                engine_.find_cue(id)->set_ltc_offset(c.ltc_offset_ns);
+                cue->set_ltc_enabled(true);
+                cue->set_ltc_frame_rate(fps_index_to_rate(c.ltc_frame_rate_index));
+                cue->set_ltc_offset(c.ltc_offset_ns);
             }
         }
     }
@@ -3935,7 +4019,8 @@ void ProjectState::arm_next_after_stop(const std::string& stopped_uuid,
         // is auto-advanced by the sequencer itself.
         std::string action = "nothing";
         if (found->contains("endBehavior") && (*found)["endBehavior"].is_object())
-            action = (*found)["endBehavior"].value("action", std::string{"nothing"});
+            action = json_get_or((*found)["endBehavior"], "action",
+                                 std::string{"nothing"});
         if (action != "nothing") return;
 
         // Advance to the next sibling in document order.
