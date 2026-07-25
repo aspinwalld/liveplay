@@ -18,6 +18,12 @@
 #  include <windows.h>   // SetThreadPriority
 #endif
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#  include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
+#  include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
+#  define LIVEPLAY_HAVE_SSE_DENORMAL 1
+#endif
+
 namespace liveplay::audio {
 
 namespace {
@@ -886,6 +892,14 @@ float AudioEngine::read_master_gain_reduction_db(MasterChannelIndex master) cons
 //     "preview without an output device assigned" case).
 void AudioEngine::render_loop() {
     Logger::debug("Render thread started.");
+#if defined(LIVEPLAY_HAVE_SSE_DENORMAL)
+    // Flush-to-zero + denormals-are-zero for this thread. The limiter and meter
+    // states decay exponentially toward zero during silence and can enter
+    // denormal range, which incurs large per-sample CPU penalties on x86;
+    // FTZ/DAZ makes those flush to zero with no audible consequence.
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
     const auto block_duration =
         std::chrono::nanoseconds{static_cast<long long>(cfg_.render_block) * 1'000'000'000LL /
                                  static_cast<long long>(cfg_.mix_sample_rate)};
