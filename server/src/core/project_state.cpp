@@ -787,7 +787,7 @@ void ProjectState::reset() {
         std::lock_guard slock{sequencer_mutex_};
         sequenced_items_.clear();
     }
-    next_item_override_.clear();
+    next_item_override_.clear(); next_item_override_manual_ = false;
 
     std::lock_guard lock{mutex_};
 
@@ -811,6 +811,12 @@ void ProjectState::reset() {
     mixer_routes_.clear();
     master_assignments_.clear();
     item_uuid_to_cue_.clear();
+    // The selection and the trigger-order stamps belong to the project that is
+    // going away; carrying them into the next one would leave control surfaces
+    // pointing at uuids that no longer exist. Show Mode and the locale are
+    // operator preferences, not project data, so they survive the reset.
+    selected_item_uuid_.clear();
+    item_trigger_seq_.clear();
     project_name_ = "Untitled";
     project_file_path_.clear();
     document_ = default_empty_document();
@@ -2104,6 +2110,23 @@ std::string ProjectState::first_playable_item_uuid_locked() const {
     return result;
 }
 
+std::vector<std::string> ProjectState::flat_item_uuids_locked() const {
+    std::vector<std::string> out;
+    if (!document_.contains("items") || !document_["items"].is_array()) return out;
+    std::function<void(const json&)> walk = [&](const json& arr) {
+        if (!arr.is_array()) return;
+        for (const auto& it : arr) {
+            if (!it.is_object()) continue;
+            const auto uuid = it.value("uuid", std::string{});
+            if (!uuid.empty()) out.push_back(uuid);
+            if (it.value("type", std::string{}) == "group" && it.contains("children"))
+                walk(it["children"]);
+        }
+    };
+    walk(document_["items"]);
+    return out;
+}
+
 // Public thread-safe wrapper: resolve an index path to an item uuid.
 std::string ProjectState::item_uuid_by_index(const std::vector<int>& path) const {
     std::lock_guard lock{mutex_};
@@ -2329,6 +2352,15 @@ bool ProjectState::play_item(const std::string& uuid,
         engine_.play(target_cue);  // logs the "no cue" warning path
     }
 
+    // Stamp the item with a monotonic trigger sequence. Control surfaces read
+    // this back from the state summary to answer "what did the operator fire
+    // LAST?" — with several cues on air (a bed under a stinger, say), document
+    // order is the wrong answer for a "currently playing" display.
+    {
+        std::lock_guard lock{mutex_};
+        item_trigger_seq_[uuid] = ++trigger_seq_counter_;
+    }
+
     // Register with the sequencer so it can handle end-behaviour, crossfade,
     // and stop-fade autonomously — even when the client is disconnected.
     {
@@ -2389,6 +2421,38 @@ bool ProjectState::play_item(const std::string& uuid,
                 if (auto* pi = engine_.find_cue(cue)) pi->prime(2.0);
             }).detach();
         }
+    }
+
+    // Playback just moved somewhere the server's own guess didn't predict, so
+    // drop a stale auto-arming — the clients then fall back to the "Up Next"
+    // derived from what is actually on air (e.g. the group child that follows
+    // the one we just started) instead of showing the item armed before the
+    // operator jumped. An arming the OPERATOR made is left alone: they chose it
+    // deliberately and GO must still honour it.
+    // Cart-only items are excluded: firing an SFX pad is not "moving the
+    // playlist", and blanking the arming there would leave GO with nothing to
+    // fire until the next cue ended.
+    {
+        bool stale = false;
+        {
+            std::lock_guard lock{mutex_};
+            if (!next_item_override_.empty() &&
+                !next_item_override_manual_ &&
+                next_item_override_ != uuid) {
+                std::function<bool(const json&)> in_playlist = [&](const json& arr) -> bool {
+                    if (!arr.is_array()) return false;
+                    for (const auto& it : arr) {
+                        if (!it.is_object()) continue;
+                        if (it.value("uuid", std::string{}) == uuid) return true;
+                        if (it.value("type", std::string{}) == "group" &&
+                            it.contains("children") && in_playlist(it["children"])) return true;
+                    }
+                    return false;
+                };
+                stale = document_.contains("items") && in_playlist(document_["items"]);
+            }
+        }
+        if (stale) set_next_item_override("", /*manual=*/false);
     }
 
     // Handle start-behaviour immediately.
@@ -2458,12 +2522,17 @@ void ProjectState::stop_all_cues(std::optional<long long> fade_ms) {
     engine_.stop_all(std::chrono::milliseconds{resolved_ms}, /*force_fade=*/true);
 }
 
-void ProjectState::set_next_item_override(const std::string& uuid) {
+void ProjectState::set_next_item_override(const std::string& uuid, bool manual) {
     std::function<void(const std::string&)> cb;
     {
         std::lock_guard lock{mutex_};
-        if (next_item_override_ == uuid) return;   // no-op: don't re-broadcast
-        next_item_override_ = uuid;
+        // Re-arming the same uuid still needs to record the (possibly stronger)
+        // provenance — an operator confirming the server's guess makes it
+        // sticky — but must not re-broadcast.
+        const bool same = (next_item_override_ == uuid);
+        next_item_override_        = uuid;
+        next_item_override_manual_ = uuid.empty() ? false : manual;
+        if (same) return;
         cb = next_item_broadcaster_;
     }
     // Fan the change out to every connected client (server- or client-
@@ -2479,6 +2548,105 @@ void ProjectState::set_next_item_broadcaster(std::function<void(const std::strin
 std::string ProjectState::next_item_override() const {
     std::lock_guard lock{mutex_};
     return next_item_override_;
+}
+
+// ---------------------------------------------------------------------------
+// Show-control surface: selection, Show Mode and locale. Server-owned so every
+// client and control surface renders the same operator state. Each setter
+// broadcasts outside the lock (the broadcaster re-enters the network layer,
+// which must never happen while holding mutex_) and only when the value
+// actually changed, so a client echoing a patch back can't loop.
+// ---------------------------------------------------------------------------
+void ProjectState::set_ui_state_broadcaster(std::function<void(const json&)> cb) {
+    std::lock_guard lock{mutex_};
+    ui_state_broadcaster_ = std::move(cb);
+}
+
+std::string ProjectState::selected_item_uuid() const {
+    std::lock_guard lock{mutex_};
+    return selected_item_uuid_;
+}
+
+bool ProjectState::set_selected_item(const std::string& uuid) {
+    std::function<void(const json&)> cb;
+    {
+        std::lock_guard lock{mutex_};
+        if (selected_item_uuid_ == uuid) return false;
+        selected_item_uuid_ = uuid;
+        cb = ui_state_broadcaster_;
+    }
+    if (cb) cb(json{{"type", "doc_patch"}, {"op", "selection_changed"}, {"itemUuid", uuid}});
+    return true;
+}
+
+std::string ProjectState::step_selection(int delta) {
+    std::string target;
+    {
+        std::lock_guard lock{mutex_};
+        const auto flat = flat_item_uuids_locked();
+        if (flat.empty()) return {};
+
+        // Nothing selected (or a selection that no longer exists — the item was
+        // deleted by another client): start at the top rather than guessing.
+        auto it = std::find(flat.begin(), flat.end(), selected_item_uuid_);
+        if (selected_item_uuid_.empty() || it == flat.end()) {
+            target = flat.front();
+        } else {
+            const auto idx = static_cast<long long>(std::distance(flat.begin(), it));
+            const auto last = static_cast<long long>(flat.size()) - 1;
+            // Clamp at both ends — the same "stop at the edge" behaviour as the
+            // client's arrow keys. Wrapping would risk a blind operator holding
+            // a button and silently landing back at the top of the show.
+            target = flat[static_cast<std::size_t>(std::clamp(idx + delta, 0LL, last))];
+        }
+    }
+    set_selected_item(target);
+    return target;
+}
+
+bool ProjectState::show_mode() const {
+    std::lock_guard lock{mutex_};
+    return show_mode_;
+}
+
+void ProjectState::set_show_mode(bool enabled) {
+    std::function<void(const json&)> cb;
+    {
+        std::lock_guard lock{mutex_};
+        if (show_mode_ == enabled) return;
+        show_mode_ = enabled;
+        cb = ui_state_broadcaster_;
+    }
+    if (cb) cb(json{{"type", "doc_patch"}, {"op", "show_mode_changed"}, {"enabled", enabled}});
+}
+
+bool ProjectState::toggle_show_mode() {
+    bool result;
+    std::function<void(const json&)> cb;
+    {
+        std::lock_guard lock{mutex_};
+        show_mode_ = !show_mode_;
+        result = show_mode_;
+        cb = ui_state_broadcaster_;
+    }
+    if (cb) cb(json{{"type", "doc_patch"}, {"op", "show_mode_changed"}, {"enabled", result}});
+    return result;
+}
+
+std::string ProjectState::ui_locale() const {
+    std::lock_guard lock{mutex_};
+    return ui_locale_;
+}
+
+void ProjectState::set_ui_locale(const std::string& code) {
+    std::function<void(const json&)> cb;
+    {
+        std::lock_guard lock{mutex_};
+        if (code.empty() || ui_locale_ == code) return;
+        ui_locale_ = code;
+        cb = ui_state_broadcaster_;
+    }
+    if (cb) cb(json{{"type", "doc_patch"}, {"op", "locale_changed"}, {"locale", code}});
 }
 
 // ---------------------------------------------------------------------------
@@ -2501,6 +2669,8 @@ json ProjectState::state_summary() const {
     // engine while holding mutex_ from here — play_item does the same dance.
     struct ItemFacts {
         std::string      name;
+        std::string      color;            // "#RRGGBB" as authored in the client
+        std::string      type;             // "audio" | "group" | "action"
         double           duration  = 0.0;  // full-file seconds (0 = unknown)
         double           in_point  = 0.0;
         double           out_point = 0.0;  // 0 = play to end
@@ -2510,6 +2680,10 @@ json ProjectState::state_summary() const {
     // uuid → (cue, duration from decode metadata)
     std::vector<std::tuple<std::string, audio::CueId, double>> cue_pairs;
     std::string override_uuid;
+    std::string selected_uuid;
+    bool        show_mode_now = false;
+    std::string locale_now;
+    std::unordered_map<std::string, long long> trigger_seq;
     json project_block;
     json cart_bindings = json::array();
 
@@ -2539,6 +2713,8 @@ json ProjectState::state_summary() const {
                 if (!uuid.empty()) {
                     ItemFacts f;
                     f.name      = it.value("displayName", std::string{});
+                    f.color     = it.value("color", std::string{});
+                    f.type      = it.value("type",  std::string{});
                     f.duration  = it.value("duration", 0.0);
                     f.in_point  = it.value("inPoint",  0.0);
                     f.out_point = it.value("outPoint", 0.0);
@@ -2564,6 +2740,8 @@ json ProjectState::state_summary() const {
                 if (uuid.empty() || facts.count(uuid)) continue;
                 ItemFacts f;
                 f.name      = it.value("displayName", std::string{});
+                f.color     = it.value("color", std::string{});
+                f.type      = it.value("type",  std::string{});
                 f.duration  = it.value("duration", 0.0);
                 f.in_point  = it.value("inPoint",  0.0);
                 f.out_point = it.value("outPoint", 0.0);
@@ -2580,6 +2758,10 @@ json ProjectState::state_summary() const {
         }
 
         override_uuid = next_item_override_;
+        selected_uuid = selected_item_uuid_;
+        show_mode_now = show_mode_;
+        locale_now    = ui_locale_;
+        trigger_seq   = item_trigger_seq_;
 
         if (document_.contains("cartItems") && document_["cartItems"].is_array()) {
             for (const auto& c : document_["cartItems"]) {
@@ -2626,6 +2808,7 @@ json ProjectState::state_summary() const {
             {"itemUuid",     e.uuid},
             {"cueId",        e.cue_id},
             {"name",         f.name},
+            {"color",        f.color},
             {"transport",    transport_state_name(e.transport)},
             {"paused",       e.transport == audio::TransportState::Paused},
             {"playheadSec",  e.playhead},
@@ -2634,6 +2817,10 @@ json ProjectState::state_summary() const {
             {"remainingSec", std::max(0.0, eff_dur - elapsed)},
         };
         if (!f.index.empty()) entry["index"] = f.index;
+        // Firing order, so a control surface can show the cue the operator
+        // triggered last rather than the topmost one in the playlist.
+        if (auto ts = trigger_seq.find(e.uuid); ts != trigger_seq.end())
+            entry["triggerSeq"] = ts->second;
         playing.push_back(std::move(entry));
     }
 
@@ -2652,19 +2839,40 @@ json ProjectState::state_summary() const {
     if (!next_uuid.empty()) {
         next = json{{"itemUuid", next_uuid}, {"source", next_source}};
         if (auto it = facts.find(next_uuid); it != facts.end()) {
-            next["name"] = it->second.name;
+            next["name"]  = it->second.name;
+            next["color"] = it->second.color;
+            next["type"]  = it->second.type;
             if (!it->second.index.empty()) next["index"] = it->second.index;
         }
     }
 
-    // Cart bindings, decorated with the bound item's name + live state.
+    // Selected playlist item. Reported even when the uuid has gone stale (the
+    // item was deleted by another client) so a surface can tell "selection
+    // points nowhere" apart from "nothing is selected".
+    json selection = nullptr;
+    if (!selected_uuid.empty()) {
+        selection = json{{"itemUuid", selected_uuid}};
+        if (auto it = facts.find(selected_uuid); it != facts.end()) {
+            selection["name"]  = it->second.name;
+            selection["color"] = it->second.color;
+            selection["type"]  = it->second.type;
+            if (!it->second.index.empty()) selection["index"] = it->second.index;
+        }
+        selection["onAir"] = std::any_of(on_air.begin(), on_air.end(),
+                                         [&](const OnAir& e){ return e.uuid == selected_uuid; });
+    }
+
+    // Cart bindings, decorated with the bound item's name, colour + live state.
     json cart = json::array();
     for (const auto& c : cart_bindings) {
         const int slot = c.value("slot", -1);
         const std::string uuid = c.value("itemUuid", std::string{});
         if (slot < 0 || uuid.empty()) continue;
         json entry{{"slot", slot}, {"itemUuid", uuid}};
-        if (auto it = facts.find(uuid); it != facts.end()) entry["name"] = it->second.name;
+        if (auto it = facts.find(uuid); it != facts.end()) {
+            entry["name"]  = it->second.name;
+            entry["color"] = it->second.color;
+        }
         entry["playing"] = std::any_of(on_air.begin(), on_air.end(),
                                        [&](const OnAir& e){ return e.uuid == uuid; });
         cart.push_back(std::move(entry));
@@ -2674,6 +2882,11 @@ json ProjectState::state_summary() const {
         {"project", std::move(project_block)},
         {"playing", std::move(playing)},
         {"next",    std::move(next)},
+        {"selection", std::move(selection)},
+        {"ui", json{
+            {"showMode", show_mode_now},
+            {"locale",   locale_now},
+        }},
         {"master", json{
             {"gainDb",         engine_.master_gain_db()},
             {"limiterEnabled", engine_.limiter_enabled()},
@@ -2796,6 +3009,19 @@ bool ProjectState::trigger_item(const std::string& uuid,
     }
     if (type == "group") {
         if (child_uuids.empty()) return false;
+        // A group that was itself armed as "Up Next" is being started now, so
+        // the arming is spent. play_item() below only ever sees the CHILD uuid,
+        // so it can't recognise the group and would leave the arming standing —
+        // which then blocked the group's 2nd child from being armed when its
+        // 1st finished.
+        {
+            bool armed_here = false;
+            {
+                std::lock_guard lock{mutex_};
+                armed_here = (next_item_override_ == uuid);
+            }
+            if (armed_here) set_next_item_override("", /*manual=*/false);
+        }
         if (start_action == "play-all") {
             bool any = false;
             for (const auto& cu : child_uuids) {
@@ -3723,7 +3949,7 @@ void ProjectState::sequencer_loop() {
                     std::lock_guard lock{mutex_};
                     if (!next_item_override_.empty()) {
                         next_uuid = std::move(next_item_override_);
-                        next_item_override_.clear();
+                        next_item_override_.clear(); next_item_override_manual_ = false;
                     } else {
                         next_uuid = resolve_next_item_locked(p.item.uuid);
                     }
@@ -3768,7 +3994,7 @@ void ProjectState::sequencer_loop() {
                     std::lock_guard lock{mutex_};
                     if (!next_item_override_.empty()) {
                         next_uuid = std::move(next_item_override_);
-                        next_item_override_.clear();
+                        next_item_override_.clear(); next_item_override_manual_ = false;
                     } else {
                         next_uuid = resolve_next_item_locked(p.item.uuid);
                     }
@@ -3931,7 +4157,7 @@ std::string ProjectState::resolve_advance_target(const SequencedItem& item) {
         std::lock_guard lock{mutex_};
         if (!next_item_override_.empty()) {
             std::string u = std::move(next_item_override_);
-            next_item_override_.clear();
+            next_item_override_.clear(); next_item_override_manual_ = false;
             return u;
         }
         return resolve_next_item_locked(item.uuid);
@@ -3968,8 +4194,12 @@ void ProjectState::arm_next_after_stop(const std::string& stopped_uuid,
                 !s["autoCueNextWithoutEndBehavior"].get<bool>()) return;
         }
 
-        // A manual / existing arming wins — never clobber it.
-        if (!next_item_override_.empty()) return;
+        // An arming the OPERATOR made wins — never clobber it. An arming the
+        // server derived itself is fair game: it goes stale as soon as playback
+        // moves somewhere it didn't predict (most visibly when the operator
+        // jumps into a group, where the old blanket "any arming wins" check
+        // meant the group's 2nd child was never armed once its 1st finished).
+        if (!next_item_override_.empty() && next_item_override_manual_) return;
 
         // Only arm once nothing else is on air (e.g. don't fire mid-crossfade).
         // The just-stopped cue is ignored: on a manual stop it may still be
@@ -4039,7 +4269,7 @@ void ProjectState::arm_next_after_stop(const std::string& stopped_uuid,
         }
     }
 
-    if (!next_to_arm.empty()) set_next_item_override(next_to_arm);
+    if (!next_to_arm.empty()) set_next_item_override(next_to_arm, /*manual=*/false);
 }
 
 void ProjectState::arm_first_item_on_open() {
@@ -4062,7 +4292,7 @@ void ProjectState::arm_first_item_on_open() {
         }
         first = first_playable_item_uuid_locked();
     }
-    if (!first.empty()) set_next_item_override(first);
+    if (!first.empty()) set_next_item_override(first, /*manual=*/false);
 }
 
 void ProjectState::handle_item_ended(const SequencedItem& item) {
@@ -4142,7 +4372,7 @@ void ProjectState::handle_item_ended(const SequencedItem& item) {
             // User-set override wins; consume it.
             if (!next_item_override_.empty()) {
                 next_uuid = std::move(next_item_override_);
-                next_item_override_.clear();
+                next_item_override_.clear(); next_item_override_manual_ = false;
             } else {
                 next_uuid = resolve_next_item_locked(item.uuid);
             }

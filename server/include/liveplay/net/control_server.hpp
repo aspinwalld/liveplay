@@ -24,6 +24,15 @@
 //   POST   /api/transport/go                 — play the armed "Up Next" item
 //   POST   /api/transport/play_index         — { "index": [1, 11] } trigger by index path
 //   POST   /api/transport/cart/{slot}/play   — trigger a cart slot's bound item
+//   POST   /api/transport/pause_toggle       — resume all paused, else pause all sounding
+//   GET    /api/selection                    — { "itemUuid": "..." } shared selection
+//   POST   /api/selection                    — { "itemUuid": "..." } or { "delta": -1|1 }
+//   POST   /api/transport/arm_selected       — arm the selected item as "Up Next"
+//   POST   /api/transport/play_selected      — trigger the selected item
+//   GET    /api/ui/showmode                  — { "enabled": bool }
+//   POST   /api/ui/showmode                  — { "enabled": bool } (omit = toggle)
+//   GET    /api/ui/locale                    — { "locale": "en" }
+//   POST   /api/ui/locale                    — { "locale": "el" }
 //   GET    /api/master/limiter               — { "enabled": bool }
 //   POST   /api/master/limiter               — { "enabled": bool } (omit = toggle)
 //   POST   /api/routing/item_to_mixer        — { cue, source_channel, mixer, gain_db }

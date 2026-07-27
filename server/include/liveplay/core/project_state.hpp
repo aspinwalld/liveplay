@@ -239,17 +239,65 @@ public:
     // endBehavior.action == "next", this uuid is consumed (and cleared)
     // before falling back to the static sibling order. Pass empty string to
     // clear without consuming. Safe to call at any time.
-    void set_next_item_override(const std::string& uuid);
+    //
+    // `manual` records WHO armed it. An operator-set arming (the default —
+    // every client/REST call means the operator picked it) is sticky: the
+    // server's own auto-arming never clobbers it. An arming the server derived
+    // itself (arm_next_after_stop / arm_first_item_on_open) passes false, so a
+    // later auto-arm may replace it once it goes stale. Without this
+    // distinction, an auto-arming left over from "open project" or from an
+    // earlier stop blocked ALL subsequent auto-arming — e.g. jumping into a
+    // group left "Up Next" stuck on the old item and never armed the group's
+    // 2nd child when its 1st finished.
+    void set_next_item_override(const std::string& uuid, bool manual = true);
     // Current "Up Next" override, or empty if none. Used by the control
     // server to seed newly-connected clients with the live override state.
     std::string next_item_override() const;
 
+    // ---- Show-control surface (shared operator UI state) -----------------
+    // The server owns the operator-facing UI state that every client AND
+    // every control surface has to agree on: which playlist item is selected,
+    // whether Show Mode is engaged, and the display locale. Clients push
+    // changes here and re-render from the broadcast, so a Companion button and
+    // the on-screen playlist can never disagree about what is selected.
+    // Each setter returns true when the value actually changed (no-ops are
+    // never broadcast) and fans the change out via the ui_state_broadcaster.
+
+    // uuid of the selected playlist item, or empty when nothing is selected.
+    std::string selected_item_uuid() const;
+    // Select an item by uuid. Pass an empty string to clear the selection.
+    bool set_selected_item(const std::string& uuid);
+    // Move the selection `delta` places through the flattened playlist — the
+    // same depth-first order (group node, then its children) that the client's
+    // Select Up / Select Down keys walk. With nothing selected it starts from
+    // the first item; the ends clamp rather than wrap. Returns the newly
+    // selected uuid, or empty when the playlist has no items.
+    std::string step_selection(int delta);
+
+    // Show Mode: the simplified, touch-friendly playback view. Server-owned so
+    // a Companion button, a tablet and the operator's laptop stay in step.
+    bool show_mode() const;
+    void set_show_mode(bool enabled);
+    bool toggle_show_mode();   // returns the resulting state
+
+    // Display locale (a code from the client's locale set, e.g. "en", "el").
+    // Mirrored so control surfaces can label their own buttons in the
+    // operator's language.
+    std::string ui_locale() const;
+    void set_ui_locale(const std::string& code);
+
+    // Install a callback invoked whenever any of the above changes. Called
+    // with a complete doc_patch payload, with no ProjectState lock held. The
+    // control server installs this to fan the change out to every client.
+    void set_ui_state_broadcaster(std::function<void(const json&)> cb);
+
     // ---- External-control surface (Bitfocus Companion, custom remotes) ----
     // Compact machine-readable transport summary: project header facts, every
-    // on-air item (name, index path, elapsed/remaining), the effective "Up
-    // Next" target, master gain/limiter state and cart-slot bindings. Built
-    // for polling-free control surfaces — fetch once on connect, then keep it
-    // fresh from the /ws push messages (cue_state, meters, doc_patch).
+    // on-air item (name, colour, index path, elapsed/remaining), the effective
+    // "Up Next" target, selection + Show Mode, master gain/limiter state and
+    // cart-slot bindings. Built for polling-free control surfaces — fetch once
+    // on connect, then keep it fresh from the /ws push messages (cue_state,
+    // meters, doc_patch).
     json state_summary() const;
 
     // GO: trigger whatever is armed as "Up Next". Uses the user-set override
@@ -371,6 +419,23 @@ private:
     // cleared when the currently-playing item's end-behavior fires "next".
     // Guarded by mutex_.
     std::string next_item_override_;
+    // True when next_item_override_ was set by the operator rather than derived
+    // by the server. See set_next_item_override(). Guarded by mutex_.
+    bool next_item_override_manual_{false};
+
+    // Shared operator UI state (see the Show-control surface above). All
+    // guarded by mutex_.
+    std::string selected_item_uuid_;
+    bool        show_mode_ = false;
+    std::string ui_locale_ = "en";
+
+    // Trigger ordering: every play_item() stamps the item with the next value
+    // of trigger_seq_counter_, so control surfaces can tell which of several
+    // on-air items was fired LAST (what an operator means by "currently
+    // playing") rather than which sits highest in the playlist. Guarded by
+    // mutex_; entries are dropped when the project resets.
+    std::unordered_map<std::string, long long> item_trigger_seq_;
+    long long                                  trigger_seq_counter_ = 0;
 
     // Background "audio mirror is still in progress" state. Exposed to
     // clients via /api/project so the UI can show a progress bar without
@@ -504,6 +569,7 @@ public:
 private:
     std::function<void(const json&)> external_action_handler_;
     std::function<void(const std::string&)> next_item_broadcaster_;
+    std::function<void(const json&)> ui_state_broadcaster_;
 
     // Backward-compat translator: takes a legacy 1.x project document and
     // produces a v2-flavoured one with the equivalent routing matrix.
@@ -549,6 +615,11 @@ private:
     // groups), or empty if the playlist has no audio items. Caller must hold
     // mutex_. Used by the server-side "Up Next" arming.
     std::string first_playable_item_uuid_locked() const;
+
+    // Every playlist item uuid in the client's flat selection order: each node
+    // followed by its children, depth-first. Groups are included (they are
+    // selectable and triggerable). Caller must hold mutex_.
+    std::vector<std::string> flat_item_uuids_locked() const;
 
     // Re-apply the in-memory state to the AudioEngine (post-load or reset).
     void apply_to_engine_locked();

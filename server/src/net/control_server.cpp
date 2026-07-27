@@ -374,6 +374,14 @@ bool ControlServer::start() {
         });
     });
 
+    // Shared operator UI state (selection / Show Mode / locale). ProjectState
+    // hands us a ready-made doc_patch payload; we only have to fan it out, so
+    // a Companion button, a touch tablet and the operator's laptop all end up
+    // showing the same selected cue and the same view mode.
+    state_.set_ui_state_broadcaster([this](const json& patch) {
+        broadcast_doc_patch(patch);
+    });
+
     // Crow's SimpleApp::run() blocks; we shove it on a worker thread.
     impl_->app_thread = std::thread([this] {
         try {
@@ -762,6 +770,12 @@ static json build_playback_snapshot(audio::AudioEngine& engine,
         {"next_item_uuid",      state.next_item_override()},
         {"master_gain_db",      engine.master_gain_db()},
         {"output_channel_gains", std::move(out_gains)},
+        // Shared operator UI state, so a client (or control surface) that joins
+        // mid-show adopts the running selection / view mode instead of
+        // imposing its own stale local one.
+        {"selected_item_uuid",  state.selected_item_uuid()},
+        {"show_mode",           state.show_mode()},
+        {"locale",              state.ui_locale()},
         {"preview", json{
             {"item_uuid", state.current_preview_item_uuid()},
             {"cue_id",    state.current_preview_cue_id().value},
@@ -949,6 +963,31 @@ static std::string handle_ws_message(crow::websocket::connection& conn,
             state.set_next_item_override(uuid);
             // Fan-out to every client happens in the .onmessage wrapper
             // (which has access to the ControlServer for broadcast).
+        }
+        else if (type == "set_selection") {
+            // Shared playlist selection. Empty/absent item_uuid clears it.
+            // ProjectState broadcasts the change (including back to the sender,
+            // which is what keeps two clients from diverging).
+            std::string uuid;
+            if (j.contains("item_uuid") && j["item_uuid"].is_string())
+                uuid = j["item_uuid"].get<std::string>();
+            state.set_selected_item(uuid);
+        }
+        else if (type == "select_step") {
+            // Move the shared selection through the flattened playlist.
+            const int delta = j.value("delta", 0);
+            if (delta != 0) state.step_selection(delta);
+        }
+        else if (type == "set_show_mode") {
+            // Omit "enabled" to toggle.
+            if (j.contains("enabled") && j["enabled"].is_boolean())
+                state.set_show_mode(j["enabled"].get<bool>());
+            else
+                state.toggle_show_mode();
+        }
+        else if (type == "set_locale") {
+            if (j.contains("locale") && j["locale"].is_string())
+                state.set_ui_locale(j["locale"].get<std::string>());
         }
         else if (type == "ping") {
             return json({{"type", "pong"}}).dump();
@@ -1228,6 +1267,128 @@ void ControlServer::install_routes() {
             }
             Logger::playback("GO: {}", item_playback_info(uuid, state_));
             return json_ok(json({{"ok", true}, {"uuid", uuid}}));
+        });
+
+    // ---- Shared operator UI state (selection / Show Mode / locale) --------
+    // These back the control-surface equivalents of the client's arrow keys,
+    // Show Mode switch and language picker. Every mutation is broadcast as a
+    // doc_patch, so the on-screen playlist and a Companion button can never
+    // disagree about what is selected.
+
+    CROW_ROUTE(app, "/api/selection").methods(crow::HTTPMethod::Get)
+        ([this]{
+            const auto uuid = state_.selected_item_uuid();
+            return json_ok(json({{"itemUuid", uuid}}));
+        });
+
+    // Body: { "itemUuid": "..." } to select (empty string clears), or
+    //       { "delta": -1 | 1 }  to step through the flattened playlist.
+    CROW_ROUTE(app, "/api/selection").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req){
+            try {
+                auto j = json::parse(req.body.empty() ? std::string{"{}"} : req.body);
+                std::string uuid;
+                if (j.contains("delta") && j["delta"].is_number_integer()) {
+                    const int delta = j["delta"].get<int>();
+                    if (delta == 0) return json_err(400, "delta must be non-zero");
+                    uuid = state_.step_selection(delta);
+                    if (uuid.empty()) return json_err(404, "playlist is empty");
+                } else if (j.contains("itemUuid") && j["itemUuid"].is_string()) {
+                    uuid = j["itemUuid"].get<std::string>();
+                    state_.set_selected_item(uuid);
+                } else {
+                    return json_err(400, "expected \"itemUuid\" or \"delta\"");
+                }
+                return json_ok(json({{"ok", true}, {"itemUuid", uuid}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    // Arm the selected item as "Up Next" — the control-surface equivalent of
+    // the client's "Set As Next" context action.
+    CROW_ROUTE(app, "/api/transport/arm_selected")
+        .methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
+        ([this]{
+            const auto uuid = state_.selected_item_uuid();
+            if (uuid.empty()) return json_err(404, "nothing is selected");
+            state_.set_next_item_override(uuid);
+            Logger::playback("ARM SELECTED: {}", item_playback_info(uuid, state_));
+            return json_ok(json({{"ok", true}, {"itemUuid", uuid}}));
+        });
+
+    // Trigger the selected item (the client's Enter / "Play Selected" key).
+    CROW_ROUTE(app, "/api/transport/play_selected")
+        .methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
+        ([this]{
+            const auto uuid = state_.selected_item_uuid();
+            if (uuid.empty()) return json_err(404, "nothing is selected");
+            Logger::playback("PLAY SELECTED: {}", item_playback_info(uuid, state_));
+            if (!state_.trigger_item(uuid))
+                return json_err(404, "item not loaded into engine");
+            return json_ok(json({{"ok", true}, {"itemUuid", uuid}}));
+        });
+
+    // Pause / resume everything on air in one press — the control-surface
+    // equivalent of the client's Pause/Resume key. Resumes if anything is
+    // paused, otherwise pauses everything sounding; that way a single button
+    // is never ambiguous about which way it will go.
+    CROW_ROUTE(app, "/api/transport/pause_toggle")
+        .methods(crow::HTTPMethod::Post, crow::HTTPMethod::Get)
+        ([this]{
+            const json summary = state_.state_summary();
+            std::vector<std::string> paused, sounding;
+            for (const auto& p : summary.value("playing", json::array())) {
+                const auto uuid = p.value("itemUuid", std::string{});
+                if (uuid.empty()) continue;
+                if (p.value("paused", false)) paused.push_back(uuid);
+                else                          sounding.push_back(uuid);
+            }
+            if (paused.empty() && sounding.empty())
+                return json_err(404, "nothing is on air");
+            const bool resuming = !paused.empty();
+            for (const auto& uuid : resuming ? paused : sounding) {
+                if (auto cue = state_.item_to_cue_id(uuid)) {
+                    if (auto* pi = engine_.find_cue(*cue)) {
+                        if (resuming) pi->resume(); else pi->pause();
+                    }
+                }
+            }
+            Logger::playback("PAUSE TOGGLE: {} {} item(s)",
+                             resuming ? "resumed" : "paused",
+                             resuming ? paused.size() : sounding.size());
+            return json_ok(json({{"ok", true}, {"resumed", resuming}}));
+        });
+
+    CROW_ROUTE(app, "/api/ui/showmode").methods(crow::HTTPMethod::Get)
+        ([this]{ return json_ok(json({{"enabled", state_.show_mode()}})); });
+
+    // Body: { "enabled": bool }; omit the field (or send an empty body) to toggle.
+    CROW_ROUTE(app, "/api/ui/showmode").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req){
+            try {
+                auto j = json::parse(req.body.empty() ? std::string{"{}"} : req.body);
+                bool enabled;
+                if (j.contains("enabled") && j["enabled"].is_boolean()) {
+                    enabled = j["enabled"].get<bool>();
+                    state_.set_show_mode(enabled);
+                } else {
+                    enabled = state_.toggle_show_mode();
+                }
+                return json_ok(json({{"ok", true}, {"enabled", enabled}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/ui/locale").methods(crow::HTTPMethod::Get)
+        ([this]{ return json_ok(json({{"locale", state_.ui_locale()}})); });
+
+    CROW_ROUTE(app, "/api/ui/locale").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req){
+            try {
+                auto j = json::parse(req.body.empty() ? std::string{"{}"} : req.body);
+                if (!j.contains("locale") || !j["locale"].is_string())
+                    return json_err(400, "expected \"locale\"");
+                state_.set_ui_locale(j["locale"].get<std::string>());
+                return json_ok(json({{"ok", true}, {"locale", state_.ui_locale()}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 
     // First-class body-addressed variant of /api/project/items/by-index/…

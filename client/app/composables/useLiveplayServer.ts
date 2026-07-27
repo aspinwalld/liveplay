@@ -618,6 +618,27 @@ function createClient() {
   function setNextItem(uuid: string | null) {
     wsSend({ type: 'set_next_item', item_uuid: uuid ?? '' });
   }
+
+  // ---- Shared operator UI state --------------------------------------
+  // Selection, Show Mode and the display locale live on the server so every
+  // client and control surface (Bitfocus Companion) agrees on them. These
+  // senders are fire-and-forget: the server echoes the change back as a
+  // doc_patch, and that echo — not the local call — is what updates state.
+  function setSelection(uuid: string | null) {
+    wsSend({ type: 'set_selection', item_uuid: uuid ?? '' });
+  }
+  function stepSelection(delta: number) {
+    wsSend({ type: 'select_step', delta });
+  }
+  // Omit `enabled` to toggle.
+  function setShowMode(enabled?: boolean) {
+    wsSend(enabled === undefined
+      ? { type: 'set_show_mode' }
+      : { type: 'set_show_mode', enabled });
+  }
+  function setServerLocale(locale: string) {
+    wsSend({ type: 'set_locale', locale });
+  }
   // Low-latency seek over the WebSocket so scrub bars feel responsive. The
   // REST endpoint is still available for callers that want a guaranteed
   // ack (mostly tooling) — see seekItemREST below.
@@ -1015,6 +1036,13 @@ function createClient() {
     pauseItem,
     resumeItem,
     setNextItem,
+
+    // shared operator UI state (server-owned; mirrored to every client)
+    setSelection,
+    stepSelection,
+    setShowMode,
+    setServerLocale,
+
     seekItem,
     seekCueId,
     seekItemREST,

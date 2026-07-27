@@ -57,8 +57,13 @@ import { useOutputTarget } from '~/composables/useOutputTarget';
 const { currentProject, addItem, consumePendingAutoProcess, updateIndices, saveProject, triggerWaveformUpdate, isLoading, getAllItemsFlat, resolveProjectPath, findItemByUuid } = useProject();
 const { t } = useLocalization();
 const { levels: outputTargetLevels } = useOutputTarget();
-const { activeCues } = useAudioEngine();
+const { activeCues, nextItemOverrideUuid } = useAudioEngine();
 const { uiMode } = useUiMode();
+const { revealSelection, commitReveal, clearReveals } = usePlaylistReveal();
+// Same useState key useProject/useShowControl bind to — watching the uuid (not
+// the `selectedItem` computed) means we react to the selection MOVING, not to
+// the item object being rebuilt by a server-pushed document.
+const selectedItemUuid = useState<string | null>('selectedItemUuid', () => null);
 const showMode = computed(() => uiMode.value === 'playback');
 const scrollContainer = ref<HTMLElement | null>(null);
 
@@ -138,12 +143,12 @@ const primaryPlayingUuid = computed<string | null>(() => {
   return keys.length ? keys[keys.length - 1]! : null;
 });
 
-function scrollItemIntoView(uuid: string) {
+function scrollItemIntoView(uuid: string, block: ScrollLogicalPosition = 'center') {
   const container = scrollContainer.value;
   if (!container) return;
   const el = container.querySelector<HTMLElement>(`[data-item-uuid="${uuid}"]`);
   if (el) {
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.scrollIntoView({ block, behavior: 'smooth' });
     return;
   }
   // Row not mounted yet (progressive mount window / nested group): bump the
@@ -152,7 +157,7 @@ function scrollItemIntoView(uuid: string) {
   const topIndex = item?.index?.[0];
   if (typeof topIndex === 'number' && topIndex >= renderLimit.value) {
     renderLimit.value = topIndex + 1;
-    nextTick(() => scrollItemIntoView(uuid));
+    nextTick(() => scrollItemIntoView(uuid, block));
   }
 }
 
@@ -163,6 +168,39 @@ watch(
     nextTick(() => scrollItemIntoView(uuid));
   },
 );
+
+// ---------------------------------------------------------------------------
+// Keep the selection reachable.
+// ---------------------------------------------------------------------------
+// The selection can be moved from off-screen — the select-up/select-down key
+// bindings, MIDI, or a Companion surface via the server — and those walk the
+// flattened tree, so the target may be scrolled away or buried in a collapsed
+// group. Hold the group open (see usePlaylistReveal), then scroll.
+//
+// `block: 'nearest'` rather than 'center': it is a no-op when the row is
+// already fully visible, so ordinary mouse clicks never jerk the list around,
+// and an off-screen selection is brought in with the smallest move that works.
+watch(selectedItemUuid, (uuid) => {
+  revealSelection(uuid);
+  if (!uuid) return;
+  // A revealed group renders its children on the next flush, so the row we
+  // want to scroll to does not exist yet at this point.
+  nextTick(() => scrollItemIntoView(uuid, 'nearest'));
+});
+
+// Playing a cue or arming one as Up Next is a commitment: the group it lives
+// in stops being a temporary peek and becomes normally expanded, staying open
+// until the operator collapses it by hand. nextItemOverrideUuid covers both an
+// operator arming and the server's own arming after a cue ends.
+// Keyed on the joined uuids, not the array: activeCues is rewritten on every
+// playhead tick, and an array getter would re-fire the tree walk ~20x/sec.
+watch(
+  () => [...activeCues.value.keys()].join('|'),
+  (keys) => { for (const uuid of keys.split('|')) if (uuid) commitReveal(uuid); },
+);
+watch(nextItemOverrideUuid, (uuid) => {
+  if (uuid) commitReveal(uuid);
+});
 
 onUnmounted(() => {
   if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
@@ -220,8 +258,12 @@ watch(
     currentProject.value?.items?.length ?? 0,
   ],
   ([folder, name], [prevFolder, prevName] = ['', '', 0]) => {
-    // Reset the "already requested" tracker when the project changes.
-    if (folder !== prevFolder || name !== prevName) requestedWaveformUuids.clear();
+    // Reset the "already requested" tracker when the project changes. Temporary
+    // group reveals go with it — they point at uuids from the old document.
+    if (folder !== prevFolder || name !== prevName) {
+      requestedWaveformUuids.clear();
+      clearReveals();
+    }
     if (waveformScanTimer) clearTimeout(waveformScanTimer);
     waveformScanTimer = setTimeout(scanForMissingWaveforms, 150);
   },
