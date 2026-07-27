@@ -176,7 +176,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: client/package-lock.json
+          cache-dependency-path: package-lock.json
 
       # Node 20 bundles npm 10.8.x, which crashes with "Cannot read properties
       # of null (reading 'edgesOut')" while resolving the platform-gated
@@ -185,11 +185,12 @@ jobs:
       - name: Update npm
         run: npm install -g npm@11
 
-      # Install from the committed lockfile — it already carries every
+      # Installed from the repo root: client is an npm workspace, so npm
+      # resolves its prefix to the root regardless of the cwd, and the root
+      # package-lock.json is the one it reads. That lockfile carries every
       # platform's optional binaries, so all four matrix targets resolve.
       - name: Install dependencies
         shell: bash
-        working-directory: client
         run: npm ci --include=optional
         env:
           CI: true
@@ -211,7 +212,7 @@ jobs:
             ~/Library/Caches/electron-builder
             ~\AppData\Local\electron\Cache
             ~\AppData\Local\electron-builder\Cache
-          key: ${{ runner.os }}-${{ matrix.triplet }}-electron-${{ hashFiles('client/package-lock.json') }}
+          key: ${{ runner.os }}-${{ matrix.triplet }}-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.triplet }}-electron-
 
