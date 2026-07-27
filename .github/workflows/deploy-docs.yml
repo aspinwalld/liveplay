@@ -36,8 +36,9 @@ jobs:
       # Node 20 bundles npm 10.8.x, which crashes with "Cannot read properties
       # of null (reading 'edgesOut')" when resolving Nuxt's platform-gated
       # optional deps (oxc bindings) from scratch. npm 11 fixes it.
+      # Pinned to 11 because npm@latest (12.x) requires Node 22+.
       - name: Update npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Install dependencies
         working-directory: ./docs-site
