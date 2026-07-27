@@ -31,11 +31,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '20'
 
-      # Node's bundled npm 10.8.x crashes with "Cannot read properties of null
-      # (reading 'edgesOut')" when resolving Nuxt's platform-gated optional
-      # deps (oxc bindings) from scratch. npm 11 fixes it.
+      # Node 20 bundles npm 10.8.x, which crashes with "Cannot read properties
+      # of null (reading 'edgesOut')" when resolving Nuxt's platform-gated
+      # optional deps (oxc bindings) from scratch. npm 11 fixes it.
       - name: Update npm
         run: npm install -g npm@latest
 

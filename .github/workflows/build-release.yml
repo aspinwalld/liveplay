@@ -178,12 +178,18 @@ jobs:
           cache: 'npm'
           cache-dependency-path: client/package-lock.json
 
-      - name: Clean install dependencies
+      # Node 20 bundles npm 10.8.x, which crashes with "Cannot read properties
+      # of null (reading 'edgesOut')" while resolving the platform-gated
+      # optional deps Nuxt pulls in (oxc/rollup bindings). npm 11 fixes it.
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      # Install from the committed lockfile — it already carries every
+      # platform's optional binaries, so all four matrix targets resolve.
+      - name: Install dependencies
         shell: bash
         working-directory: client
-        run: |
-          rm -rf node_modules package-lock.json
-          npm install --include=optional
+        run: npm ci --include=optional
         env:
           CI: true
 
