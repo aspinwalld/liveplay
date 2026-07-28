@@ -783,6 +783,25 @@ static json build_playback_snapshot(audio::AudioEngine& engine,
     };
 }
 
+// uuids of every item that is currently sounding, in cue-registration order.
+// Used as the fallback anchor for selection stepping: with nothing selected,
+// "select down" should continue from what the operator is hearing rather than
+// snapping back to the top of the playlist. Returns empty when something IS
+// already selected — an explicit selection always wins, and skipping the walk
+// keeps the common case free.
+static std::vector<std::string> selection_anchors(audio::AudioEngine& engine,
+                                                  core::ProjectState& state) {
+    std::vector<std::string> playing;
+    if (!state.selected_item_uuid().empty()) return playing;
+    for (auto& cue : state.list_cues()) {
+        auto* item = engine.find_cue(cue.id);
+        if (!item) continue;
+        if (item->stats().transport == audio::TransportState::Stopped) continue;
+        if (auto uuid = state.cue_to_item_uuid(cue.id)) playing.push_back(*uuid);
+    }
+    return playing;
+}
+
 // ---------------------------------------------------------------------------
 // Returns a non-empty string if a direct reply to this specific client is
 // needed (pong, error). The caller sends it under ws_mutex so it doesn't
@@ -975,8 +994,14 @@ static std::string handle_ws_message(crow::websocket::connection& conn,
         }
         else if (type == "select_step") {
             // Move the shared selection through the flattened playlist.
+            //
+            // With nothing selected we hand ProjectState the items that are
+            // currently sounding, so the step continues from what the operator
+            // is hearing instead of snapping back to the top of the show. This
+            // only applies when there is no selection — an explicit selection
+            // always wins.
             const int delta = j.value("delta", 0);
-            if (delta != 0) state.step_selection(delta);
+            if (delta != 0) state.step_selection(delta, selection_anchors(engine, state));
         }
         else if (type == "set_show_mode") {
             // Omit "enabled" to toggle.
@@ -1291,7 +1316,7 @@ void ControlServer::install_routes() {
                 if (j.contains("delta") && j["delta"].is_number_integer()) {
                     const int delta = j["delta"].get<int>();
                     if (delta == 0) return json_err(400, "delta must be non-zero");
-                    uuid = state_.step_selection(delta);
+                    uuid = state_.step_selection(delta, selection_anchors(engine_, state_));
                     if (uuid.empty()) return json_err(404, "playlist is empty");
                 } else if (j.contains("itemUuid") && j["itemUuid"].is_string()) {
                     uuid = j["itemUuid"].get<std::string>();

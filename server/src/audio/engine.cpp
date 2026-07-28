@@ -476,6 +476,10 @@ CueId AudioEngine::load_cue_no_route(const std::filesystem::path& file_path,
     return item->id();
 }
 
+CueId AudioEngine::new_cue_id() const {
+    return CueId{gen_uuid_like()};
+}
+
 void AudioEngine::unload_cue(const CueId& id) {
     std::lock_guard lock{mutex_};
     auto it = items_.find(id.value);
@@ -1045,9 +1049,12 @@ void AudioEngine::render_one_block(const Topology& topo) {
 
     for (std::size_t i = 0; i < active_mixers.size(); ++i) {
         auto& m = active_mixers[i];
-        // current_gain_linear() advances any active fade by one render block —
-        // call it exactly once per strip, then apply to every lane.
-        const float gain_lin = m->current_gain_linear();
+        // Advance the strip's fade envelope by exactly one render block, then
+        // read the resulting gain. peek_gain_linear() is side-effect-free, so
+        // the read may be repeated (metering, gain application) without the
+        // fade running at a multiple of its configured speed.
+        m->advance_block();
+        const float gain_lin = m->peek_gain_linear();
         const bool  audible  = !m->is_muted() && (!any_soloed || m->is_soloed());
         const float effective = audible ? gain_lin : 0.0f;
         for (ChannelIndex lane = 0; lane < kMixerLanes; ++lane) {

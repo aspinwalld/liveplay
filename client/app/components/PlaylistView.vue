@@ -51,10 +51,10 @@ import Btn from './Btn.vue';
 import { triggerRef } from 'vue';
 import type { AudioItem, GroupItem } from '~/types/project';
 import { DEFAULT_AUDIO_ITEM, DEFAULT_GROUP_ITEM, transitionDefaultsForImport, anchorStartNextMarker } from '~/types/project';
-import { applyAutoProcessing } from '~/utils/audio';
+import { applyAutoProcessing, buildWaveformFromChannels, parseWaveformFileData } from '~/utils/audio';
 import { useOutputTarget } from '~/composables/useOutputTarget';
 
-const { currentProject, addItem, consumePendingAutoProcess, updateIndices, saveProject, triggerWaveformUpdate, isLoading, getAllItemsFlat, resolveProjectPath, findItemByUuid } = useProject();
+const { currentProject, addItem, consumePendingAutoProcess, updateIndices, saveProject, triggerWaveformUpdate, isLoading, getAllItemsFlat, resolveProjectPath, findItemByUuid, projectEpoch } = useProject();
 const { t } = useLocalization();
 const { levels: outputTargetLevels } = useOutputTarget();
 const { activeCues, nextItemOverrideUuid } = useAudioEngine();
@@ -256,11 +256,18 @@ watch(
     currentProject.value?.folderPath ?? '',
     currentProject.value?.name ?? '',
     currentProject.value?.items?.length ?? 0,
+    projectEpoch.value,
   ],
-  ([folder, name], [prevFolder, prevName] = ['', '', 0]) => {
+  ([folder, name, , epoch], [prevFolder, prevName, , prevEpoch] = ['', '', 0, 0]) => {
     // Reset the "already requested" tracker when the project changes. Temporary
     // group reveals go with it — they point at uuids from the old document.
-    if (folder !== prevFolder || name !== prevName) {
+    //
+    // The epoch check covers reloads of the SAME project, where folderPath and
+    // name are both unchanged: session recovery re-hydrates from the server
+    // with fresh items that carry no peaks, and without a reset every uuid
+    // would still be marked "already requested" from before the disconnect, so
+    // nothing would ever ask the server for them again.
+    if (folder !== prevFolder || name !== prevName || epoch !== prevEpoch) {
       requestedWaveformUuids.clear();
       clearReveals();
     }
@@ -416,10 +423,12 @@ const generateWaveformAsync = async (item: AudioItem) => {
         try {
           const server = (await import('~/composables/useLiveplayServer')).useLiveplayServer();
           const serverWf = await server.fetchWaveformByPath(item.mediaServerPath);
-          const peaks = serverWf.channels[0]?.peak ?? [];
           const duration = serverWf.duration_ms / 1000;
-          if (peaks.length > 0) {
-            item.waveform = { peaks, length: peaks.length, duration };
+          // All source channels, not just the left one (#47).
+          const built = buildWaveformFromChannels(serverWf.channels, duration);
+          const peaks = built?.peaks ?? [];
+          if (built && peaks.length > 0) {
+            item.waveform = built;
             if (duration > 0) { item.duration = duration; item.outPoint = duration; }
             maybeAutoProcess(item);
             triggerWaveformUpdate();
@@ -441,10 +450,10 @@ const generateWaveformAsync = async (item: AudioItem) => {
     const existingWaveform = await window.electronAPI.readFile(resolveProjectPath(item.waveformPath));
     if (existingWaveform.success && existingWaveform.data) {
       try {
-        const waveformData = JSON.parse(existingWaveform.data);
+        // Accepts both the server's per-channel cache and legacy ffmpeg files.
+        const waveformData = parseWaveformFileData(JSON.parse(existingWaveform.data));
 
-        // Validate waveform format (duration field is optional now)
-        if (waveformData.peaks && waveformData.peaks.length > 0) {
+        if (waveformData) {
           item.waveform = waveformData;
 
           // Update duration from waveform data if available (more accurate than Audio API)
@@ -472,11 +481,12 @@ const generateWaveformAsync = async (item: AudioItem) => {
         try {
           const server = (await import('~/composables/useLiveplayServer')).useLiveplayServer();
           const serverWf = await server.fetchWaveformByPath(item.mediaServerPath);
-          // Flatten multi-channel peaks to a single array (use ch0, fall back to empty)
-          const peaks = serverWf.channels[0]?.peak ?? [];
+          // Keep every channel; `peaks` is their per-bucket max (#47).
           const duration = serverWf.duration_ms / 1000;
-          if (peaks.length > 0) {
-            item.waveform = { peaks, length: peaks.length, duration };
+          const built = buildWaveformFromChannels(serverWf.channels, duration);
+          const peaks = built?.peaks ?? [];
+          if (built && peaks.length > 0) {
+            item.waveform = built;
             if (duration > 0) {
               item.duration = duration;
               item.outPoint = duration;
@@ -506,10 +516,9 @@ const generateWaveformAsync = async (item: AudioItem) => {
         try {
           const waveformFile = await window.electronAPI.readFile(resolveProjectPath(item.waveformPath));
           if (waveformFile.success && waveformFile.data) {
-            const waveformData = JSON.parse(waveformFile.data);
+            const waveformData = parseWaveformFileData(JSON.parse(waveformFile.data));
 
-            // Validate waveform format (duration field is optional)
-            if (waveformData.peaks && waveformData.peaks.length > 0) {
+            if (waveformData) {
               item.waveform = waveformData;
 
               // Update duration from waveform data if available (more accurate than Audio API)

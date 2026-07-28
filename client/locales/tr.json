@@ -480,12 +480,23 @@
     "title": "Bağlantı kesildi",
     "message": "{url} adresindeki LivePlay sunucusuyla bağlantı kesildi.",
     "attempting": "Yeniden bağlanmaya çalışılıyor…",
-    "reconnect": "Yeniden bağlan",
+    "attemptCount": "(Başarısız deneme: {count})",
+    "locked": "Bağlantı geri gelene kadar oynatma ve düzenleme duraklatıldı — şimdi yapılan değişiklikler sunucuya gönderilemezdi.",
+    "pill": "Yeniden bağlanıyor…",
+    "reconnect": "Şimdi yeniden dene",
     "restart": "Yeniden başlat",
     "exit": "Çıkış",
-    "reconnectHint": "Yeniden bağlan aynı sunucuyu tekrar dener.",
+    "reconnectHint": "Şimdi yeniden dene, bir sonraki otomatik denemeyi beklemeden aynı sunucuya hemen bağlanmayı dener.",
     "restartHint": "Yeniden başlat yalnızca istemciyi yeniden başlatır (ses sunucusu çalışmaya devam eder).",
     "exitHint": "Çıkış istemciyi kapatır."
+  },
+  "sessionRecovery": {
+    "title": "Sunucu yeniden başlatıldı",
+    "message": "Bağlantı geri geldi, ancak sunucuda artık açık bir proje yok — büyük olasılıkla yeniden başlatıldı. Projeniz hâlâ bu bilgisayarda duruyor.",
+    "resume": "Oturuma devam et",
+    "startFresh": "Sıfırdan başla",
+    "resumeHint": "Oturuma devam et, bu projeyi sunucuda yeniden açar; böylece kaldığınız yerden sürdürebilirsiniz.",
+    "startFreshHint": "Sıfırdan başla, projeyi kapatır ve karşılama ekranına döner."
   },
   "audioImport": {
     "title": "Ses içe aktar",

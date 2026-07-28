@@ -480,12 +480,23 @@
     "title": "Connexion perdue",
     "message": "La connexion au serveur LivePlay à {url} a été perdue.",
     "attempting": "Tentative de reconnexion…",
-    "reconnect": "Reconnecter",
+    "attemptCount": "(Tentatives échouées : {count})",
+    "locked": "La lecture et l'édition sont suspendues jusqu'au rétablissement de la connexion — les modifications faites maintenant ne pourraient pas être envoyées au serveur.",
+    "pill": "Reconnexion…",
+    "reconnect": "Réessayer maintenant",
     "restart": "Redémarrer",
     "exit": "Quitter",
-    "reconnectHint": "Reconnecter tente de joindre à nouveau le même serveur.",
+    "reconnectHint": "Réessayer maintenant contacte immédiatement le même serveur au lieu d'attendre la prochaine tentative automatique.",
     "restartHint": "Redémarrer relance uniquement le client (le serveur audio continue de fonctionner).",
     "exitHint": "Quitter ferme le client."
+  },
+  "sessionRecovery": {
+    "title": "Serveur redémarré",
+    "message": "La connexion est rétablie, mais le serveur n'a plus de projet ouvert — il a très probablement été redémarré. Votre projet est toujours présent sur cet ordinateur.",
+    "resume": "Reprendre la session",
+    "startFresh": "Repartir de zéro",
+    "resumeHint": "Reprendre la session rouvre ce projet sur le serveur pour que vous puissiez continuer.",
+    "startFreshHint": "Repartir de zéro le ferme et revient à l'écran d'accueil."
   },
   "audioImport": {
     "title": "Importer de l'audio",

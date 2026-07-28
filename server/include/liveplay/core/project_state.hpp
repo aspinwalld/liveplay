@@ -25,6 +25,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -33,6 +35,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace liveplay::core {
@@ -172,6 +175,13 @@ public:
     // separate `cartOnlyItems` array (cart slots, not the playlist) so a
     // cart-bound cue never leaks into the playlist tree. Returns the cue_id
     // of the newly engine-loaded audio item, or empty for groups / on failure.
+    //
+    // The returned CueId is valid immediately, but the audio decode happens on
+    // a background loader thread: adding a large or network-mounted file must
+    // never stall play_item / stop / state requests (#43). The cue appears in
+    // list_cues()/find_cue() straight away; the engine's PlaybackItem shows up
+    // when the decode finishes. play_item() waits for a still-loading cue's own
+    // decode (and only that one), so an immediate play after add still works.
     audio::CueId add_item(const json& item, const std::string& parent_uuid = "",
                           bool cart_only = false);
     bool         update_item(const std::string& uuid, const json& patch);
@@ -269,10 +279,18 @@ public:
     bool set_selected_item(const std::string& uuid);
     // Move the selection `delta` places through the flattened playlist — the
     // same depth-first order (group node, then its children) that the client's
-    // Select Up / Select Down keys walk. With nothing selected it starts from
-    // the first item; the ends clamp rather than wrap. Returns the newly
-    // selected uuid, or empty when the playlist has no items.
-    std::string step_selection(int delta);
+    // Select Up / Select Down keys walk. The ends clamp rather than wrap.
+    // Returns the newly selected uuid, or empty when the playlist has no items.
+    //
+    // With nothing selected, `anchor_candidates` (the items currently playing)
+    // supplies the notional current position and the step is taken from there,
+    // so a control surface pressing Select Down mid-show lands on the cue
+    // *after* the one that's playing rather than jumping back to the top of the
+    // playlist. When several are playing we take the one furthest down the
+    // playlist — a show advances downward, so that's the operator's position.
+    // With nothing selected and nothing playing, the step starts from the top.
+    std::string step_selection(int delta,
+                               const std::vector<std::string>& anchor_candidates = {});
 
     // Show Mode: the simplified, touch-friendly playback view. Server-owned so
     // a Companion button, a tablet and the operator's laptop stay in step.
@@ -593,6 +611,51 @@ private:
     // duration. Used by load() so the document is returned to the client
     // immediately and audio loading proceeds in the background.
     void start_async_mirror();
+
+    // ---- Single-item async audio load (#43) --------------------------------
+    // add_item() / update_item() used to run mirror_items_to_engine_locked()
+    // while holding mutex_, so the synchronous audio decode of ONE new file
+    // blocked every other request (play_item, stop, state, WS/HTTP handlers)
+    // for its full duration. Instead they now reserve the CueId under the lock,
+    // register a placeholder CueMeta, and hand the decode to a background
+    // loader thread which publishes the finished cue afterwards.
+
+    // Reserve a cue id for `uuid`, register the placeholder CueMeta, and queue
+    // the decode. Caller MUST hold mutex_. Returns the reserved id (never empty
+    // unless `path` is empty). `item` is the document node, used for the
+    // placeholder's display name / duration and re-read when the load lands.
+    audio::CueId begin_item_load_locked(const std::string& uuid,
+                                        const std::filesystem::path& path,
+                                        const json& item);
+
+    // Loader thread body: decode queued items and publish them.
+    void loader_loop();
+    void stop_loaders();
+
+    // Apply one document item's engine-visible properties (gain, fades,
+    // out point, LTC) to its PlaybackItem. Caller must hold mutex_. Shared by
+    // mirror_items_to_engine_locked() and the loader's publish step so the two
+    // paths can't drift apart.
+    void apply_item_properties_locked(const json& item, const audio::CueId& cue);
+
+    // Block until `uuid`'s queued decode has finished (or `timeout` elapses).
+    // Call with NO lock held. Returns true if the item is no longer pending.
+    // Only ever waits on that one item — unrelated requests are untouched.
+    bool wait_for_item_load(const std::string& uuid,
+                            std::chrono::milliseconds timeout);
+
+    struct LoadRequest {
+        std::string           uuid;
+        audio::CueId          cue_id;
+        std::filesystem::path path;
+    };
+    std::deque<LoadRequest>         load_queue_;
+    std::unordered_set<std::string> pending_load_uuids_;
+    std::mutex                      loader_mutex_;      // guards both of the above
+    std::condition_variable         loader_cv_;         // work available
+    std::condition_variable         loader_done_cv_;    // a pending load finished
+    std::thread                     loader_thread_;
+    bool                            loaders_stop_ = false;
 
     // Walk the items tree calling `visit(item_json, parent_uuid)` for each.
     static void for_each_item(json& doc,

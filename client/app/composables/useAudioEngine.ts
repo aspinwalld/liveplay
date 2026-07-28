@@ -60,6 +60,11 @@ const TRANSPORT_FADING_IN = 2;
 const TRANSPORT_FADING_OUT= 3;
 const TRANSPORT_PAUSED    = 4;
 
+// Renderer-scoped guard for the WebSocket subscriptions below. Module scope,
+// not per-call: the whole point is that repeated useAudioEngine() calls reuse
+// one set of subscribers instead of stacking new ones. See the block it guards.
+let _wsWired = false;
+
 export const useAudioEngine = () => {
   const { currentProject, findItemByUuid, findItemByIndex } = useProject();
   const { cartOnlyItems } = useCartItems();
@@ -279,6 +284,22 @@ export const useAudioEngine = () => {
   });
 
   // ---- WS / REST plumbing -------------------------------------------
+  // Installed exactly once per renderer. Everything below writes only to
+  // useState-backed shared state, so a single set of subscribers serves every
+  // caller — and a single set is the only safe number. useAudioEngine() is
+  // called per playlist row, per cart slot, per active cue, and from inside
+  // event handlers (MainWorkspace's F1 path), and none of these ever
+  // unsubscribed. The meters broadcast arrives at frame rate, so each leaked
+  // subscriber became permanent per-frame work: re-mounting the playlist —
+  // exactly what session recovery does — multiplied the fan-out by the row
+  // count and left the UI lagging for the rest of the session.
+  if (import.meta.client && !_wsWired) {
+    _wsWired = true;
+    // Detached effect scope. The first caller is nearly always a component,
+    // and a bare watch() here would be owned by that component and stopped the
+    // moment it unmounts — silently taking the now-shared subscription with it.
+    effectScope(true).run(() => {
+
   // cue_state edges: Playing/FadingIn/Paused create or update; Stopped
   // removes. FadingOut keeps the entry so the bar continues to render
   // its trailing seconds.
@@ -420,6 +441,9 @@ export const useAudioEngine = () => {
     }
     recomputeActiveGroups();
   });
+
+    });
+  }   // end one-time WS wiring
 
   // ---- Transport intents (forward to server) -------------------------
   // Note: the server's WS `play` handler routes to trigger_item, which

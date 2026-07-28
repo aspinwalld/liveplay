@@ -43,7 +43,19 @@ public:
     void begin_fade(float target_db, std::chrono::milliseconds duration) noexcept;
 
     // ---- Audio-thread reads ----------------------------------------------
-    float current_gain_linear() noexcept;     // applies any active ramp
+    // Side-effect-free read of the strip gain, including the value an active
+    // fade has reached. Safe to call any number of times per render block (for
+    // metering, for gain application, from the control thread) — it never
+    // advances the fade envelope.
+    float peek_gain_linear() const noexcept;
+
+    // Advance an active fade envelope by `frames`. Call exactly ONCE per render
+    // block per strip, from the render thread only. Returns nothing: read the
+    // resulting gain with peek_gain_linear().
+    void  advance(FrameCount frames) noexcept;
+    // Convenience: advance by the configured render block size.
+    void  advance_block() noexcept { advance(render_block_); }
+
     bool  is_muted() const noexcept           { return muted_.load(std::memory_order_relaxed); }
     bool  is_soloed() const noexcept          { return soloed_.load(std::memory_order_relaxed); }
 

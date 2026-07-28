@@ -12,9 +12,15 @@
 import { defineNuxtPlugin } from 'nuxt/app';
 import { useLiveplayServer } from '~/composables/useLiveplayServer';
 import { useShowControl } from '~/composables/useShowControl';
+import { useConnectionGuard } from '~/composables/useConnectionGuard';
 
 export default defineNuxtPlugin(async () => {
   const server = useLiveplayServer();
+
+  // Installs the while-disconnected input freeze and the post-reconnect
+  // "does the server still have our project?" probe. Wired before the socket
+  // opens so the very first reconnect is covered.
+  useConnectionGuard();
 
   // Subscribe to the server-owned operator state (selection / Show Mode /
   // locale) before the socket opens, so the first playback_snapshot is not

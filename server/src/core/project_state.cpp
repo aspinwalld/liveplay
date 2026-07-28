@@ -478,10 +478,13 @@ std::chrono::nanoseconds parse_smpte_timecode_to_ns(const std::string& tc,
 ProjectState::ProjectState(audio::AudioEngine& engine) : engine_(engine) {
     document_ = default_empty_document();
     start_sequencer();
+    // Background decoder for single-item adds/media swaps (#43).
+    loader_thread_ = std::thread([this] { loader_loop(); });
 }
 
 ProjectState::~ProjectState() {
     stop_sequencer();
+    stop_loaders();
     // Make sure any in-flight async mirror finishes before the engine is
     // torn down — otherwise the worker would dereference dangling state.
     {
@@ -501,6 +504,183 @@ ProjectState::~ProjectState() {
     if (!preview_device_.empty()) {
         engine_.close_device(preview_device_);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Single-item async audio load (#43)
+// ---------------------------------------------------------------------------
+// add_item() and update_item() must return promptly and must not hold mutex_
+// across an audio decode: one large or network-mounted file used to stall every
+// other request (play_item, stop, state, WS/HTTP handlers) for the whole decode.
+//
+// The split: under mutex_ we reserve the CueId and register a placeholder
+// CueMeta (so the cue is immediately visible to find_cue / list_cues /
+// item_to_cue_id and callers get a usable id synchronously), then queue the
+// decode. The loader thread decodes with no ProjectState lock held and takes
+// mutex_ again only for the cheap publish step.
+// ---------------------------------------------------------------------------
+audio::CueId ProjectState::begin_item_load_locked(const std::string& uuid,
+                                                  const std::filesystem::path& path,
+                                                  const json& item) {
+    if (uuid.empty() || path.empty()) return {};
+
+    const audio::CueId cue_id{engine_.new_cue_id()};
+
+    // Placeholder metadata: the real artist/title/duration arrive with the
+    // decode. Seed the duration from the document so the sequencer has
+    // something sane if the item is fired before the load lands.
+    CueMeta meta;
+    meta.id        = cue_id;
+    meta.file_path = path;
+    meta.display_name = item.value("displayName", std::string{});
+    if (meta.display_name.empty())
+        meta.display_name = util::path_to_utf8(path.filename());
+    meta.duration_seconds = json_get_or(item, "duration", 0.0);
+    cues_.emplace(cue_id.value, std::move(meta));
+    item_uuid_to_cue_[uuid] = cue_id;
+
+    {
+        std::lock_guard qlock{loader_mutex_};
+        load_queue_.push_back(LoadRequest{uuid, cue_id, path});
+        pending_load_uuids_.insert(uuid);
+    }
+    loader_cv_.notify_one();
+    return cue_id;
+}
+
+void ProjectState::loader_loop() {
+    for (;;) {
+        LoadRequest req;
+        {
+            std::unique_lock qlock{loader_mutex_};
+            loader_cv_.wait(qlock, [this] {
+                return loaders_stop_ || !load_queue_.empty();
+            });
+            // On shutdown, drop whatever is still queued: those cues are about
+            // to be torn down anyway, and the process shouldn't wait on them.
+            if (loaders_stop_) return;
+            req = std::move(load_queue_.front());
+            load_queue_.pop_front();
+        }
+
+        // Guard the whole task — an exception escaping here would terminate the
+        // process, and a decode touches the filesystem (network shares, removable
+        // media) where anything can go wrong.
+        try {
+            // The expensive part: decoder init + metadata read, NO lock held.
+            const auto loaded_id = engine_.load_cue_no_route(req.path, req.cue_id);
+            const auto md        = meta::read_metadata(req.path);
+
+            bool  publish   = false;
+            bool  is_cart   = false;
+            json  item_snap;
+            {
+                std::lock_guard lock{mutex_};
+                // The item may have been removed, or its media swapped again,
+                // while we were decoding. Either way this cue is now an orphan.
+                auto it = item_uuid_to_cue_.find(req.uuid);
+                const bool still_wanted =
+                    it != item_uuid_to_cue_.end() && it->second == req.cue_id;
+
+                if (!still_wanted || loaded_id.empty()) {
+                    if (!loaded_id.empty()) engine_.unload_cue(loaded_id);
+                    cues_.erase(req.cue_id.value);
+                    if (!still_wanted) {
+                        Logger::info("ProjectState: dropped stale load for uuid='{}'",
+                                     req.uuid);
+                    } else {
+                        // Decode failed: drop the placeholder mapping too, so the
+                        // item reads as "not loaded" rather than silently dead.
+                        item_uuid_to_cue_.erase(req.uuid);
+                        Logger::warn("ProjectState: failed to load item uuid='{}' ('{}')",
+                                     req.uuid, util::path_to_utf8(req.path));
+                    }
+                } else {
+                    auto cm_it = cues_.find(req.cue_id.value);
+                    if (cm_it != cues_.end()) {
+                        auto& meta = cm_it->second;
+                        if (!md.title.empty()) meta.display_name = md.title;
+                        meta.artist = md.artist;
+                        meta.title  = md.title;
+                        if (md.duration.count() > 0) {
+                            meta.duration_seconds =
+                                static_cast<double>(md.duration.count()) / 1000.0;
+                        }
+                    }
+                    // Re-read the document node: the operator may have changed
+                    // volume/fades/out point while the decode was running.
+                    for_each_item(document_, [&](json& it2, const std::string&) {
+                        if (it2.value("uuid", std::string{}) == req.uuid)
+                            item_snap = it2;
+                    });
+                    if (item_snap.is_object())
+                        apply_item_properties_locked(item_snap, req.cue_id);
+                    // Cart-bound cues get primed below — they can be fired by a
+                    // hotkey/MIDI at any moment and must be hot.
+                    if (document_.contains("cartItems") &&
+                        document_["cartItems"].is_array()) {
+                        for (const auto& c : document_["cartItems"]) {
+                            if (c.is_object() &&
+                                c.value("itemUuid", std::string{}) == req.uuid) {
+                                is_cart = true;
+                                break;
+                            }
+                        }
+                    }
+                    publish = true;
+                }
+            }
+
+            if (publish) {
+                // Routing needs no ProjectState lock; apply_ltc_device_routing()
+                // takes mutex_ itself, so it must run unlocked.
+                engine_.ensure_default_routing();
+                apply_ltc_device_routing();
+                if (is_cart) {
+                    if (auto* pi = engine_.find_cue(req.cue_id)) pi->prime(2.0);
+                }
+                Logger::info("ProjectState: loaded item uuid='{}' cue='{}'",
+                             req.uuid, req.cue_id.value);
+            }
+        } catch (const std::exception& e) {
+            Logger::error("ProjectState loader: uuid='{}' threw: {}", req.uuid, e.what());
+        } catch (...) {
+            Logger::error("ProjectState loader: uuid='{}' threw (unknown).", req.uuid);
+        }
+
+        // Release anyone waiting on this specific item (see wait_for_item_load).
+        {
+            std::lock_guard qlock{loader_mutex_};
+            pending_load_uuids_.erase(req.uuid);
+        }
+        loader_done_cv_.notify_all();
+    }
+}
+
+void ProjectState::stop_loaders() {
+    {
+        std::lock_guard qlock{loader_mutex_};
+        loaders_stop_ = true;
+    }
+    loader_cv_.notify_all();
+    if (loader_thread_.joinable()) loader_thread_.join();
+    // Nothing will ever complete now — release any wait_for_item_load() caller.
+    {
+        std::lock_guard qlock{loader_mutex_};
+        load_queue_.clear();
+        pending_load_uuids_.clear();
+    }
+    loader_done_cv_.notify_all();
+}
+
+bool ProjectState::wait_for_item_load(const std::string& uuid,
+                                      std::chrono::milliseconds timeout) {
+    std::unique_lock qlock{loader_mutex_};
+    if (pending_load_uuids_.find(uuid) == pending_load_uuids_.end()) return true;
+    Logger::info("ProjectState: waiting for '{}' to finish loading", uuid);
+    return loader_done_cv_.wait_for(qlock, timeout, [this, &uuid] {
+        return pending_load_uuids_.find(uuid) == pending_load_uuids_.end();
+    });
 }
 
 void ProjectState::start_async_mirror() {
@@ -765,6 +945,20 @@ void ProjectState::start_async_mirror() {
 }
 
 void ProjectState::reset() {
+    // Drop queued single-item loads and let any in-flight decode finish before
+    // we clear the tables (#43). A load that published after the reset would
+    // resurrect a cue belonging to the project we just closed.
+    {
+        std::unique_lock qlock{loader_mutex_};
+        for (const auto& req : load_queue_) pending_load_uuids_.erase(req.uuid);
+        load_queue_.clear();
+        loader_done_cv_.wait_for(qlock, std::chrono::seconds{20}, [this] {
+            return pending_load_uuids_.empty();
+        });
+    }
+    // Release anyone waiting on a load we just cancelled.
+    loader_done_cv_.notify_all();
+
     // Quiesce any in-flight async mirror BEFORE taking mutex_. The mirror
     // worker acquires mutex_ in its phases, so joining it while we held the
     // lock would deadlock. mirror_mutex_ also serialises us against a
@@ -1045,70 +1239,81 @@ void ProjectState::mirror_items_to_engine_locked() {
             const std::string uuid = item.value("uuid", std::string{});
             auto it = item_uuid_to_cue_.find(uuid);
             if (it == item_uuid_to_cue_.end()) return;
-            auto* cue = engine_.find_cue(it->second);
-            if (!cue) return;
-
-            // volume: 0..2 linear (matches the client). Engine takes dB.
-            if (item.contains("volume") && item["volume"].is_number()) {
-                const float lin = item["volume"].get<float>();
-                const float db  = (lin <= 0.0001f) ? -120.0f :
-                                    20.0f * std::log10(lin);
-                cue->set_gain_db(db);
-            }
-            if (item.contains("playFade") && item["playFade"].is_number()) {
-                cue->set_fade_in(std::chrono::milliseconds{
-                    static_cast<long long>(item["playFade"].get<double>() * 1000.0)});
-            }
-            // Manual-stop fade-out: the UI's "STOP FADE OUT" slider writes to
-            // `stopFade`, which is also used by the sequencer to begin fading
-            // before natural end. We expose the larger of the two as the
-            // PlaybackItem's fade_out_duration so the stop button (and global
-            // stop) honour whichever value the user actually configured —
-            // without breaking legacy projects that only set fadeOutDuration.
-            {
-                double stop_fade_sec = 0.0;
-                double fade_out_dur  = 0.0;
-                if (item.contains("stopFade") && item["stopFade"].is_number())
-                    stop_fade_sec = item["stopFade"].get<double>();
-                if (item.contains("fadeOutDuration") && item["fadeOutDuration"].is_number())
-                    fade_out_dur = item["fadeOutDuration"].get<double>();
-                const double effective = std::max(stop_fade_sec, fade_out_dur);
-                cue->set_fade_out(std::chrono::milliseconds{
-                    static_cast<long long>(effective * 1000.0)});
-            }
-            // outPoint: when set (> 0), engine fades out as the playhead reaches
-            // that time instead of running to the file end.
-            if (item.contains("outPoint") && item["outPoint"].is_number()) {
-                cue->set_out_point_seconds(item["outPoint"].get<double>());
-            } else {
-                cue->set_out_point_seconds(0.0);  // disabled
-            }
-
-            // LTC: configure enabled/rate/offset on the PlaybackItem.
-            // Routing of the synthetic LTC channel to the ltcDevice is done
-            // AFTER this function returns (via apply_ltc_device_routing()).
-            const bool ltc_on = item.value("ltcEnabled", false);
-            const std::string tc_str = item.value("ltcStartTimecode",
-                                                   std::string{"00:00:00:00"});
-            const int fps_idx = item.value("ltcFrameRate", 4);
-            cue->set_ltc_enabled(ltc_on);
-            if (ltc_on) {
-                const auto offset = parse_smpte_timecode_to_ns(tc_str, fps_idx);
-                cue->set_ltc_frame_rate(fps_index_to_rate(fps_idx));
-                cue->set_ltc_offset(offset);
-                auto cm_it = cues_.find(it->second.value);
-                if (cm_it != cues_.end()) {
-                    cm_it->second.ltc_enabled          = true;
-                    cm_it->second.ltc_frame_rate_index = fps_idx;
-                    cm_it->second.ltc_offset_ns        = offset;
-                    cm_it->second.ltc_start_timecode   = tc_str;
-                }
-            }
+            apply_item_properties_locked(item, it->second);
         });
 
     // Now that every cue is in items_ and properties like ltc_enabled are
     // configured, establish default routing ONCE.
     engine_.ensure_default_routing();
+}
+
+// ---------------------------------------------------------------------------
+// Push one document item's engine-visible properties onto its PlaybackItem.
+// Caller holds mutex_. No-op when the cue isn't in the engine (yet) — that is
+// the normal state for an item whose background decode is still in flight; the
+// loader calls this again once the cue exists.
+// ---------------------------------------------------------------------------
+void ProjectState::apply_item_properties_locked(const json& item,
+                                                const audio::CueId& cue_id) {
+    auto* cue = engine_.find_cue(cue_id);
+    if (!cue) return;
+
+    // volume: 0..2 linear (matches the client). Engine takes dB.
+    if (item.contains("volume") && item["volume"].is_number()) {
+        const float lin = item["volume"].get<float>();
+        const float db  = (lin <= 0.0001f) ? -120.0f :
+                            20.0f * std::log10(lin);
+        cue->set_gain_db(db);
+    }
+    if (item.contains("playFade") && item["playFade"].is_number()) {
+        cue->set_fade_in(std::chrono::milliseconds{
+            static_cast<long long>(item["playFade"].get<double>() * 1000.0)});
+    }
+    // Manual-stop fade-out: the UI's "STOP FADE OUT" slider writes to
+    // `stopFade`, which is also used by the sequencer to begin fading
+    // before natural end. We expose the larger of the two as the
+    // PlaybackItem's fade_out_duration so the stop button (and global
+    // stop) honour whichever value the user actually configured —
+    // without breaking legacy projects that only set fadeOutDuration.
+    {
+        double stop_fade_sec = 0.0;
+        double fade_out_dur  = 0.0;
+        if (item.contains("stopFade") && item["stopFade"].is_number())
+            stop_fade_sec = item["stopFade"].get<double>();
+        if (item.contains("fadeOutDuration") && item["fadeOutDuration"].is_number())
+            fade_out_dur = item["fadeOutDuration"].get<double>();
+        const double effective = std::max(stop_fade_sec, fade_out_dur);
+        cue->set_fade_out(std::chrono::milliseconds{
+            static_cast<long long>(effective * 1000.0)});
+    }
+    // outPoint: when set (> 0), engine fades out as the playhead reaches
+    // that time instead of running to the file end.
+    if (item.contains("outPoint") && item["outPoint"].is_number()) {
+        cue->set_out_point_seconds(item["outPoint"].get<double>());
+    } else {
+        cue->set_out_point_seconds(0.0);  // disabled
+    }
+
+    // LTC: configure enabled/rate/offset on the PlaybackItem.
+    // Routing of the synthetic LTC channel to the ltcDevice is done by the
+    // caller after it releases mutex_ (via apply_ltc_device_routing()).
+    const bool ltc_on = item.value("ltcEnabled", false);
+    const std::string tc_str = item.value("ltcStartTimecode",
+                                           std::string{"00:00:00:00"});
+    const int fps_idx = item.value("ltcFrameRate", 4);
+    cue->set_ltc_enabled(ltc_on);
+    if (ltc_on) {
+        const auto offset = parse_smpte_timecode_to_ns(tc_str, fps_idx);
+        cue->set_ltc_frame_rate(fps_index_to_rate(fps_idx));
+        cue->set_ltc_offset(offset);
+        auto cm_it = cues_.find(cue_id.value);
+        if (cm_it != cues_.end()) {
+            cm_it->second.ltc_enabled          = true;
+            cm_it->second.ltc_frame_rate_index = fps_idx;
+            cm_it->second.ltc_offset_ns        = offset;
+            cm_it->second.ltc_start_timecode   = tc_str;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,11 +1903,28 @@ audio::CueId ProjectState::add_item(const json& item, const std::string& parent_
                 document_["items"].push_back(item);
             }
         }
-        mirror_items_to_engine_locked();
+        // Queue the audio load(s) for what we just inserted instead of decoding
+        // inline: mirror_items_to_engine_locked() decodes while holding mutex_,
+        // so adding one big or network-mounted file stalled every other request
+        // for the whole decode (#43). Walking the document (rather than just the
+        // new node) covers a group's children too, and picks up any earlier item
+        // that still has no cue — the same set the mirror would have loaded.
+        for_each_item(document_, [&](json& it, const std::string&) {
+            if (it.value("type", std::string{}) != "audio") return;
+            const std::string u = it.value("uuid", std::string{});
+            if (u.empty()) return;
+            if (item_uuid_to_cue_.find(u) != item_uuid_to_cue_.end()) return;
+            auto path = resolve_media_path(
+                it, document_.value("folderPath", std::string{}));
+            if (path.empty()) return;
+            begin_item_load_locked(u, path, it);
+        });
         auto it = item_uuid_to_cue_.find(uuid);
         if (it != item_uuid_to_cue_.end()) result = it->second;
     }
     // Route any LTC-enabled items to the LTC device (after releasing mutex_).
+    // The loader repeats this once the decode lands — this call covers items
+    // that were already loaded.
     apply_ltc_device_routing();
     return result;
 }
@@ -1752,7 +1974,25 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
                 touched = true;
                 updated_item = &it;
             });
-        if (touched && media_path_changed) {
+        if (touched && media_path_changed && updated_item &&
+            updated_item->value("type", std::string{}) == "audio") {
+            // The media file behind this item changed: retire the old cue and
+            // queue a fresh decode on the loader thread. Doing it inline (via
+            // mirror_items_to_engine_locked) meant the decode ran under mutex_
+            // and blocked every other request for its duration (#43).
+            auto old = item_uuid_to_cue_.find(uuid);
+            if (old != item_uuid_to_cue_.end()) {
+                engine_.unload_cue(old->second);
+                cues_.erase(old->second.value);
+                item_uuid_to_cue_.erase(old);
+            }
+            auto path = resolve_media_path(
+                *updated_item, document_.value("folderPath", std::string{}));
+            if (!path.empty())
+                begin_item_load_locked(uuid, path, *updated_item);
+        } else if (touched && media_path_changed) {
+            // Media change on something that isn't a loadable audio item —
+            // fall back to the full mirror (cheap: nothing to decode).
             mirror_items_to_engine_locked();
         } else if (touched && updated_item) {
             // Cheap path: apply audio-engine-visible properties to the
@@ -2142,6 +2382,12 @@ bool ProjectState::play_item(const std::string& uuid,
   // Guard the whole body: a malformed item field must never throw uncaught
   // into the network layer. (#5)
   try {
+    // If this item was added moments ago its decode may still be running on the
+    // loader thread (#43). Wait for THAT item only — every other request stays
+    // responsive — and bound the wait so a wedged network share can't hang the
+    // caller. Returns immediately when nothing is pending, which is the norm.
+    wait_for_item_load(uuid, std::chrono::seconds{20});
+
     // Snapshot everything we need under the lock, then release before
     // touching the engine (engine calls take their own locks).
     std::string  ducking_mode  = "stop-all";
@@ -2579,17 +2825,33 @@ bool ProjectState::set_selected_item(const std::string& uuid) {
     return true;
 }
 
-std::string ProjectState::step_selection(int delta) {
+std::string ProjectState::step_selection(int delta,
+                                         const std::vector<std::string>& anchor_candidates) {
     std::string target;
     {
         std::lock_guard lock{mutex_};
         const auto flat = flat_item_uuids_locked();
         if (flat.empty()) return {};
 
-        // Nothing selected (or a selection that no longer exists — the item was
-        // deleted by another client): start at the top rather than guessing.
         auto it = std::find(flat.begin(), flat.end(), selected_item_uuid_);
-        if (selected_item_uuid_.empty() || it == flat.end()) {
+        bool have_position = !selected_item_uuid_.empty() && it != flat.end();
+
+        // Nothing selected (or a selection that no longer exists — the item was
+        // deleted by another client). If the caller handed us anchors — the
+        // items currently playing — step from the furthest one down the
+        // playlist: an operator who has been firing cues without touching the
+        // selection means "carry on from what I'm hearing", not "jump back to
+        // the top of the show".
+        if (!have_position && !anchor_candidates.empty()) {
+            for (const auto& uuid : anchor_candidates) {
+                auto anchor = std::find(flat.begin(), flat.end(), uuid);
+                if (anchor == flat.end()) continue;
+                if (!have_position || anchor > it) { it = anchor; have_position = true; }
+            }
+        }
+
+        if (!have_position) {
+            // No selection and nothing playing: start at the top.
             target = flat.front();
         } else {
             const auto idx = static_cast<long long>(std::distance(flat.begin(), it));

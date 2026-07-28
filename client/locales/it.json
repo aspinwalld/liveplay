@@ -480,12 +480,23 @@
     "title": "Connessione persa",
     "message": "La connessione al server LivePlay su {url} è stata persa.",
     "attempting": "Tentativo di riconnessione…",
-    "reconnect": "Riconnetti",
+    "attemptCount": "(Tentativi falliti: {count})",
+    "locked": "La riproduzione e la modifica sono in pausa finché la connessione non torna: le modifiche fatte ora non potrebbero essere inviate al server.",
+    "pill": "Riconnessione…",
+    "reconnect": "Riprova ora",
     "restart": "Riavvia",
     "exit": "Esci",
-    "reconnectHint": "Riconnetti prova di nuovo con lo stesso server.",
+    "reconnectHint": "Riprova ora contatta subito lo stesso server invece di attendere il prossimo tentativo automatico.",
     "restartHint": "Riavvia riavvia solo il client (il server audio continua a funzionare).",
     "exitHint": "Esci chiude il client."
+  },
+  "sessionRecovery": {
+    "title": "Server riavviato",
+    "message": "La connessione è tornata, ma il server non ha più un progetto aperto: molto probabilmente è stato riavviato. Il tuo progetto è ancora qui, su questo computer.",
+    "resume": "Continua sessione",
+    "startFresh": "Ricomincia",
+    "resumeHint": "Continua sessione riapre questo progetto sul server così puoi proseguire.",
+    "startFreshHint": "Ricomincia lo chiude e torna alla schermata iniziale."
   },
   "audioImport": {
     "title": "Importa audio",

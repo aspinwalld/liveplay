@@ -480,12 +480,23 @@
     "title": "Verbindung verloren",
     "message": "Die Verbindung zum LivePlay-Server unter {url} wurde unterbrochen.",
     "attempting": "Verbindung wird wiederhergestellt…",
-    "reconnect": "Erneut verbinden",
+    "attemptCount": "(Fehlgeschlagene Versuche: {count})",
+    "locked": "Wiedergabe und Bearbeitung sind pausiert, bis die Verbindung wieder steht — Änderungen könnten jetzt nicht an den Server gesendet werden.",
+    "pill": "Verbinde neu…",
+    "reconnect": "Jetzt erneut versuchen",
     "restart": "Neu starten",
     "exit": "Beenden",
-    "reconnectHint": "Erneut verbinden versucht erneut, denselben Server zu erreichen.",
+    "reconnectHint": "Jetzt erneut versuchen kontaktiert sofort denselben Server, statt auf den nächsten automatischen Versuch zu warten.",
     "restartHint": "Neu starten startet nur den Client neu (der Audioserver läuft weiter).",
     "exitHint": "Beenden schließt den Client."
+  },
+  "sessionRecovery": {
+    "title": "Server neu gestartet",
+    "message": "Die Verbindung steht wieder, aber auf dem Server ist kein Projekt mehr geöffnet — er wurde höchstwahrscheinlich neu gestartet. Ihr Projekt ist auf diesem Computer weiterhin vorhanden.",
+    "resume": "Sitzung fortsetzen",
+    "startFresh": "Neu beginnen",
+    "resumeHint": "Sitzung fortsetzen öffnet dieses Projekt wieder auf dem Server, damit Sie weiterarbeiten können.",
+    "startFreshHint": "Neu beginnen schließt es und kehrt zum Startbildschirm zurück."
   },
   "audioImport": {
     "title": "Audio importieren",
