@@ -64,7 +64,8 @@
         </div>
         <div class="mixer-row__action">
           Master channel:
-          <input v-model.number="mixerToMasterDraft[mc.id]" type="number" min="0" max="63" />
+          <input v-model.number="mixerToMasterDraft[mc.id]" type="number"
+                 min="0" :max="server.masterBus.channels - 1" />
           Gain (dB):
           <input v-model.number="mixerToMasterGainDraft[mc.id]" type="number" step="0.5" />
           <button class="btn small primary" @click="addMixerToMaster(mc.id)">Wire</button>
@@ -85,7 +86,9 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="m in 8" :key="`m-${m - 1}`">
+          <!-- One row per master channel actually present on the bus. The width
+               is a server boot option, so this can't be a fixed count. -->
+          <tr v-for="m in server.masterBus.channels" :key="`m-${m - 1}`">
             <td><code>{{ m - 1 }}</code></td>
             <td>
               <select v-model="masterAssignDevice[m - 1]">

@@ -108,6 +108,7 @@ function createClient() {
     cues: Array<{ cue_id: string; transport: number; playhead_seconds: number }>;
     next_item_uuid: string;
     preview: { item_uuid: string; cue_id: string };
+    master_bus?: { channels: number; preview_l: number; preview_r: number };
   };
   type PlaybackSnapshotSubscriber = (s: PlaybackSnapshot) => void;
   const playbackSnapshotSubscribers = new Set<PlaybackSnapshotSubscriber>();
@@ -303,6 +304,15 @@ function createClient() {
           // Restore per-output-channel gains from snapshot.
           for (const g of (snap as any).output_channel_gains ?? []) {
             outputChannelGains.value[g.channel] = g.db;
+          }
+          // Adopt the server's master-bus geometry. Absent on older servers,
+          // in which case the 32-wide defaults stay in place.
+          if (snap.master_bus) {
+            masterBus.value = {
+              channels:  snap.master_bus.channels,
+              previewL:  snap.master_bus.preview_l,
+              previewR:  snap.master_bus.preview_r,
+            };
           }
           for (const cb of playbackSnapshotSubscribers) cb(snap);
           break;
@@ -746,6 +756,16 @@ function createClient() {
   // Reactive map of per-output-channel gains (channel index → dB).
   const outputChannelGains = ref<Record<number, number>>({});
 
+  // Master-bus geometry, learned from the server's playback_snapshot. The bus
+  // width is configurable at boot, so the preview pair is not always 30/31 —
+  // the UI must place output meters from these values rather than assume. The
+  // defaults below match a 32-wide bus so a pre-#5 server still renders right.
+  const masterBus = ref<{ channels: number; previewL: number; previewR: number }>({
+    channels: 32,
+    previewL: 30,
+    previewR: 31,
+  });
+
   // Theme + settings shallow-merge patches.
   async function patchTheme(patch: any) {
     return rest<any>('/api/project/theme', {
@@ -1095,6 +1115,7 @@ function createClient() {
     fetchMasterGainDb,
     outputChannelGains,
     setOutputChannelGainDb,
+    masterBus,
 
     // cart bindings
     setCartSlot,

@@ -136,14 +136,40 @@ liveplay-server [options]
   -b, --bind <addr>         Interface to bind (default 0.0.0.0)
       --pidfile <path>      Write JSON {pid,port,startedAt} after binding
       --start-delay-ms <n>  Wait <n> ms before binding (used by crash-restart)
+      --meter-hz <n>        WebSocket meter push rate, 1-120 (default 30)
+      --max-upload-mb <n>   Max upload size in MiB, 1-8192 (default 256)
+
+  Engine (applied at boot — the engine cannot be re-initialised later):
+      --mix-sample-rate <hz>    Mix sample rate, 8000-192000 (default 48000)
+      --render-block <frames>   Render block size, 32-8192 (default 256)
+      --master-channels <n>     Master bus width, 4-1024 (default 32)
+      --master-ceiling-db <db>  Limiter ceiling, -24.0-0.0 (default -0.3)
+
   -v, --verbose             Enable debug-level logging
   -h, --help                Show this help and exit
 
 Environment:
-  LIVEPLAY_PORT         Same as --port
-  NO_COLOR=1            Disable ANSI colour in logs
-  FORCE_COLOR=1         Force colour even when stdout isn't a tty
+  LIVEPLAY_PORT              Same as --port
+  LIVEPLAY_MIX_SAMPLE_RATE   Same as --mix-sample-rate
+  LIVEPLAY_RENDER_BLOCK      Same as --render-block
+  LIVEPLAY_MASTER_CHANNELS   Same as --master-channels
+  LIVEPLAY_MASTER_CEILING_DB Same as --master-ceiling-db
+  LIVEPLAY_METER_HZ          Same as --meter-hz
+  LIVEPLAY_MAX_UPLOAD_MB     Same as --max-upload-mb
+  NO_COLOR=1                 Disable ANSI colour in logs
+  FORCE_COLOR=1              Force colour even when stdout isn't a tty
 ```
+
+A CLI flag always overrides the matching environment variable. Values that are
+unparseable or out of range are reported in the log and then **ignored** — the
+built-in default stays in force rather than a typo silently misconfiguring the
+engine.
+
+Master-bus geometry is not fixed: the top two channels are always reserved for
+the Preview bus, so at the default 32-wide bus preview sits on 30/31, and at a
+16-wide bus on 14/15. Clients must read `masterChannels` / `previewMasterL` /
+`previewMasterR` from `GET /api/state/summary` (or the `master_bus` block in the
+`playback_snapshot` WebSocket frame) rather than assuming 30/31.
 
 The control surface listens on **TCP 4480** (REST + WebSocket). Alongside it, the
 [discovery beacon](include/liveplay/net/discovery.hpp) announces the server on

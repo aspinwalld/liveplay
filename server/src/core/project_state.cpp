@@ -27,7 +27,7 @@ inline std::string id_to_string(const audio::DeviceId& id)       { return id.val
 // this never throws on a wrong-typed (or null) field — it returns `def`
 // instead. Malformed project fields (e.g. a number where a string is
 // expected) would otherwise throw nlohmann::type_error uncaught through the
-// network layer. (#5)
+// network layer. 
 template <class T>
 T json_get_or(const nlohmann::json& j, const char* key, const T& def) noexcept {
     try {
@@ -1628,7 +1628,7 @@ bool ProjectState::save(const std::filesystem::path& path) const {
         // Atomic write: serialise to a sibling temp file, verify the stream is
         // healthy, then rename it over the target. A write error, disk-full, or
         // crash therefore never truncates or corrupts the previous good file —
-        // the documented "preserve previous state on failure" contract. (#5)
+        // the documented "preserve previous state on failure" contract. 
         std::filesystem::path tmp = path;
         tmp += ".tmp";
         {
@@ -2380,7 +2380,7 @@ bool ProjectState::play_item(const std::string& uuid,
                              double fade_in_override_sec,
                              const audio::CueId& exclude_from_ducking) {
   // Guard the whole body: a malformed item field must never throw uncaught
-  // into the network layer. (#5)
+  // into the network layer. 
   try {
     // If this item was added moments ago its decode may still be running on the
     // loader thread (#43). Wait for THAT item only — every other request stays
@@ -3221,7 +3221,7 @@ bool ProjectState::trigger_item(const std::string& uuid,
                                 double fade_in_override_sec,
                                 const audio::CueId& exclude_from_ducking) {
   // Guard the whole body: a malformed item field must never throw uncaught
-  // into the network layer. (#5)
+  // into the network layer. 
   try {
     // Look up the item's type and (for groups) startBehavior + children.
     std::string type;
@@ -3330,16 +3330,13 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
         std::lock_guard lock{mutex_};
         // Bound-check master allocation. Each distinct device override consumes
         // a pair of master channels growing upward from next_override_master_,
-        // while the top two channels of the bus are reserved for preview
-        // (kPreviewMasterL/R). Never allocate into or past that reserve — doing
-        // so would collide with preview output or run past the engine's master
-        // bus width. Compute the reserved base from the live bus width rather
-        // than trusting the 30/31 literals. (#5)
+        // while the top two channels of the bus are reserved for preview.
+        // Never allocate into or past that reserve — doing so would collide with
+        // preview output or run past the engine's master bus width. 
         const audio::MasterChannelIndex bus_width =
             engine_.config().master_channels;
         const audio::MasterChannelIndex reserved_base =
-            (bus_width >= 2) ? static_cast<audio::MasterChannelIndex>(bus_width - 2)
-                             : 0;
+            audio::preview_master_base(bus_width);
         if (next_override_master_ + 1 >= reserved_base) {
             Logger::error(
                 "ensure_device_routing: out of master channels for '{}' "
@@ -3410,13 +3407,6 @@ void ProjectState::route_cue_to_mixer(const audio::CueId& cue,
 // (device + mixer + master assignments) is set up lazily on first preview
 // and reused for subsequent ones.
 // ---------------------------------------------------------------------------
-namespace {
-// Master channels reserved for preview output. Picked from the tail of the
-// 32-channel master bus so they don't collide with project routing.
-constexpr audio::MasterChannelIndex kPreviewMasterL = 30;
-constexpr audio::MasterChannelIndex kPreviewMasterR = 31;
-}  // namespace
-
 bool ProjectState::start_preview(const std::string& item_uuid) {
     if (item_uuid.empty()) return false;
 
@@ -3501,11 +3491,17 @@ bool ProjectState::start_preview(const std::string& item_uuid) {
                 Logger::warn("preview: could not open device '{}'", preview_device_name);
                 return false;
             }
+            // Preview owns the top two channels of the bus, wherever the
+            // configured bus width puts them. 
+            const audio::MasterChannelIndex preview_l =
+                audio::preview_master_base(engine_.config().master_channels);
+            const audio::MasterChannelIndex preview_r = preview_l + 1;
+
             const auto mixer = engine_.create_mixer_channel("Preview");
-            engine_.assign_master_to_device(kPreviewMasterL, dev, 0);
-            engine_.assign_master_to_device(kPreviewMasterR, dev, 1);
-            engine_.route_mixer_to_master(mixer, kPreviewMasterL, 0.0f, 0);
-            engine_.route_mixer_to_master(mixer, kPreviewMasterR, 0.0f, 1);
+            engine_.assign_master_to_device(preview_l, dev, 0);
+            engine_.assign_master_to_device(preview_r, dev, 1);
+            engine_.route_mixer_to_master(mixer, preview_l, 0.0f, 0);
+            engine_.route_mixer_to_master(mixer, preview_r, 0.0f, 1);
             {
                 std::lock_guard lock{mutex_};
                 preview_device_      = dev;
@@ -3988,7 +3984,7 @@ void ProjectState::apply_to_engine_locked() {
         if (!id.empty()) {
             // Cache the lookup once and null-check it — find_cue can return
             // null (e.g. the load raced with an unload) and the previous code
-            // dereferenced it up to six times unchecked. (#5)
+            // dereferenced it up to six times unchecked. 
             auto* cue = engine_.find_cue(id);
             if (!cue) continue;
             cue->set_gain_db(c.gain_db);

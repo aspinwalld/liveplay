@@ -780,6 +780,14 @@ static json build_playback_snapshot(audio::AudioEngine& engine,
             {"item_uuid", state.current_preview_item_uuid()},
             {"cue_id",    state.current_preview_cue_id().value},
         }},
+        // Master-bus geometry, so the UI can label and place output meters
+        // without hardcoding a bus width. Preview always occupies the top pair,
+        // which is only 30/31 at the default 32-wide bus.
+        {"master_bus", json{
+            {"channels",   engine.config().master_channels},
+            {"preview_l",  audio::preview_master_base(engine.config().master_channels)},
+            {"preview_r",  audio::preview_master_base(engine.config().master_channels) + 1},
+        }},
     };
 }
 
@@ -1270,6 +1278,15 @@ void ControlServer::install_routes() {
 #endif
                     }},
                     {"meterBroadcastHz", cfg_.meter_broadcast_hz},
+                    // Master-bus geometry. The bus width is configurable at
+                    // boot, so clients must read the preview pair from here
+                    // rather than assuming the historical 30/31.
+                    {"masterChannels", engine_.config().master_channels},
+                    {"previewMasterL",
+                     audio::preview_master_base(engine_.config().master_channels)},
+                    {"previewMasterR",
+                     audio::preview_master_base(engine_.config().master_channels) + 1},
+                    {"maxUploadBytes", cfg_.max_upload_bytes},
                 };
                 return json_ok(s);
             } catch (const std::exception& e) { return json_err(500, e.what()); }

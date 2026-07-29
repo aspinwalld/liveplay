@@ -27,7 +27,14 @@ using ChannelIndex  = std::uint32_t;
 
 inline constexpr SampleRate   kDefaultMixSampleRate  = 48'000;
 inline constexpr FrameCount   kDefaultRenderBlock    = 256;   // ~5.3 ms @ 48k
-inline constexpr ChannelCount kDefaultMasterChannels = 64;    // sparse; usually only a handful are wired
+inline constexpr ChannelCount kDefaultMasterChannels = 32;    // sparse; usually only a handful are wired
+inline constexpr float        kDefaultMasterCeilingDb = -0.3f;
+
+// The top two master channels are reserved for the Preview bus, and the default
+// stereo Main output always occupies masters 0/1, so the bus can never be
+// narrower than four channels.
+inline constexpr ChannelCount kReservedPreviewChannels = 2;
+inline constexpr ChannelCount kMinMasterChannels       = 4;
 
 // Mixer strips carry this many parallel audio lanes (stereo: L=0, R=1).
 // Item→mixer and mixer→master sends address a specific lane; kAllMixerLanes
@@ -70,6 +77,16 @@ using DeviceId       = detail::StringId<DeviceIdTag>;
 // number of them and they map 1:1 to hardware destinations.
 using MasterChannelIndex = std::uint32_t;
 inline constexpr MasterChannelIndex kInvalidMasterChannel = static_cast<MasterChannelIndex>(-1);
+
+// First master channel of the Preview reserve, which always sits at the very top
+// of the bus. Preview routing and the device-override allocator both have to
+// agree on where the reserve begins, so it is derived here in exactly one place
+// instead of being spelled as literals in each.
+constexpr MasterChannelIndex preview_master_base(MasterChannelIndex bus_width) noexcept {
+    return bus_width >= kReservedPreviewChannels
+               ? static_cast<MasterChannelIndex>(bus_width - kReservedPreviewChannels)
+               : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Linear / decibel gain helpers

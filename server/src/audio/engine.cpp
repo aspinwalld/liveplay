@@ -53,9 +53,21 @@ std::string gen_uuid_like() {
 // Construction / lifecycle
 // ---------------------------------------------------------------------------
 AudioEngine::AudioEngine(EngineConfig cfg) : cfg_(cfg) {
+    // Zero means "unset" — fall back to the default without comment. A value
+    // that was set but is unusable is a misconfiguration, so it gets clamped
+    // loudly rather than silently producing a bus too narrow to route.
     if (cfg_.master_channels == 0) cfg_.master_channels = kDefaultMasterChannels;
     if (cfg_.render_block    == 0) cfg_.render_block    = kDefaultRenderBlock;
     if (cfg_.mix_sample_rate == 0) cfg_.mix_sample_rate = kDefaultMixSampleRate;
+
+    if (cfg_.master_channels < kMinMasterChannels) {
+        Logger::warn("AudioEngine: master_channels={} is below the minimum of {} "
+                     "(masters 0/1 are the default Main output and the top {} are "
+                     "reserved for Preview); clamping to {}",
+                     cfg_.master_channels, kMinMasterChannels,
+                     kReservedPreviewChannels, kMinMasterChannels);
+        cfg_.master_channels = kMinMasterChannels;
+    }
 
     master_state_.resize(cfg_.master_channels);
     for (auto& ms : master_state_) {

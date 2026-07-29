@@ -119,8 +119,8 @@ struct DeviceInfo {
 struct EngineConfig {
     SampleRate         mix_sample_rate    = kDefaultMixSampleRate;
     FrameCount         render_block       = kDefaultRenderBlock;
-    MasterChannelIndex master_channels    = 32;     // logical bus width
-    float              master_ceiling_db  = -0.3f;
+    MasterChannelIndex master_channels    = kDefaultMasterChannels;  // logical bus width
+    float              master_ceiling_db  = kDefaultMasterCeilingDb;
 };
 
 // ---------------------------------------------------------------------------
