@@ -126,6 +126,8 @@ export interface CartSlotKeyBinding {
 export type PlaybackKeyAction =
   | 'pause-resume'
   | 'toggle-loop'
+  | 'cue-to-continue'
+  | 'jump-cue'
   | 'stop-all'
   | 'select-up'
   | 'select-down'
