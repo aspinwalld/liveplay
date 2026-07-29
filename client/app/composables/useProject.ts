@@ -54,6 +54,10 @@ import {
 let _syncWatchersInstalled = false;
 let _refreshItemsBaselineAfterHydrate: () => void = () => {};
 let _captureBaselinesFn: () => void = () => {};
+// Bridges endItemBatch (outer composable scope) to syncItemsDiff (defined
+// inside the one-time sync-watcher init block) — see endItemBatch's comment
+// for why calling this directly, not just captureBaselines, matters.
+let _syncItemsDiffFn: () => Promise<void> = async () => {};
 let _installItemsWatcherFn:   null | (() => void) = null;
 let _uninstallItemsWatcherFn: null | (() => void) = null;
 
@@ -1549,9 +1553,22 @@ export const useProject = () => {
                 cacheWaveform(patch.item_uuid, (target as any).waveform);
 
                 if (!hadWaveform && duration > 0) {
-                  // First waveform for this item: initialise duration + out point.
+                  // First waveform for this item this session: initialise duration.
                   (target as any).duration = duration;
-                  (target as any).outPoint  = duration;
+                  // Only initialise outPoint for a genuinely brand-new item.
+                  // `_waveformCache` is in-memory only and starts empty on every
+                  // reload, so `!hadWaveform` is ALSO true for an existing,
+                  // already-trimmed item whose waveform just happens to be the
+                  // first this fresh session has seen — without this check that
+                  // reload would stomp its real, already-hydrated outPoint back
+                  // to full duration the instant the waveform arrives (in-point
+                  // is never touched here, which is why only out-points were
+                  // reverting). The item's own outPoint — hydrated from the
+                  // project file before this patch ever arrives — is the
+                  // persistent signal the session cache can't provide.
+                  if (!(target as any).outPoint) {
+                    (target as any).outPoint = duration;
+                  }
                 }
 
                 // Auto-process (trim silence + normalise) only for items that
@@ -1792,12 +1809,29 @@ export const useProject = () => {
       }
 
       // 4. Updates: items whose content changed (not cross-parent, not new).
+      //
+      // A group's own JSON embeds its full `children` array, so ANY child
+      // property edit (e.g. a trim point) also changes the group's serialized
+      // JSON — which would otherwise queue a *second*, redundant PATCH for the
+      // group here, carrying a full snapshot of every child. The server's
+      // update_item does a blind per-key merge (`it[k] = v`), so if that
+      // group-level patch is built from a snapshot older than the child's own
+      // more specific patch and lands after it (a real race under rapid edits
+      // or concurrent activity — overlapping syncItemsDiff calls don't
+      // serialize against each other), it silently reverts the child back to
+      // the stale value embedded in the group's snapshot. Children are already
+      // synced via their own uuid entries in this same loop — a group patch
+      // should only ever carry the group's own metadata, never children.
+      const withoutChildren = (it: any) =>
+        it && it.type === 'group' ? { ...it, children: undefined } : it;
       for (const [uuid, { item, parentUuid, cartOnly }] of curr) {
         const before = prev.get(uuid);
         if (!before) continue;
         if (before.parentUuid !== parentUuid || before.cartOnly !== cartOnly) continue; // handled in step 1
-        if (stableJson(before.item) === stableJson(item)) continue;
-        try { await srv.updateProjectItem(uuid, item); } catch {}
+        const beforeCompare = withoutChildren(before.item);
+        const nowCompare    = withoutChildren(item);
+        if (stableJson(beforeCompare) === stableJson(nowCompare)) continue;
+        try { await srv.updateProjectItem(uuid, nowCompare); } catch {}
       }
 
       // 5. Reorder: for each parent level, if the item order changed call
@@ -1833,6 +1867,7 @@ export const useProject = () => {
         }
       }
     }
+    _syncItemsDiffFn = syncItemsDiff;
 
     // ---- Fallback for keys without granular endpoints ----
     // Only fires when one of the specific "no-endpoint-yet" fields changes
@@ -1885,7 +1920,20 @@ export const useProject = () => {
   // Drag-batch helpers — defined at composable scope so they're always
   // accessible from the return object regardless of the init-block latch.
   const beginItemBatch = () => { _suppressItemSyncCount.value++; };
-  const endItemBatch   = () => { _suppressItemSyncCount.value = 0; _captureBaselinesFn(); };
+  // Bug fix: this used to call only _captureBaselinesFn(), which re-snapshots
+  // the *current* (just-dragged, never-sent) item state as the new baseline —
+  // marking the drag's final value as "already in sync" without ever pushing
+  // it to the server. The change looked fine locally but the server (and the
+  // saved project file) kept the pre-drag value, so it silently reverted on
+  // the next reload. _syncItemsDiffFn() (syncItemsDiff) is what actually
+  // diffs against the old baseline and pushes the change before rotating it —
+  // call that first, then _captureBaselinesFn() as a safety net for the
+  // non-item fields (cart/theme/settings) it also baselines.
+  const endItemBatch = () => {
+    _suppressItemSyncCount.value = 0;
+    _syncItemsDiffFn().catch(e => console.warn('[useProject] endItemBatch sync failed:', e));
+    _captureBaselinesFn();
+  };
 
   return {
     currentProject,
