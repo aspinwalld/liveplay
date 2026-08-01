@@ -47,7 +47,7 @@
         :disabled="bus.system"
         @click.stop="$emit('patch', bus.id, { width: bus.width >= 2 ? 1 : 2 })"
       >{{ bus.width >= 2 ? 'ST' : 'M' }}</button>
-      <button class="strip__fx" :title="t('mixer.channelDetails')" @click.stop="$emit('open', bus.id)">
+      <button class="strip__fx" :title="t('mixer.channelDetails')" @click.stop="$emit('open', bus.id)"><!-- opens details, forcing full width: the three-column layout is unusable in a docked pane -->
         <span class="material-symbols-rounded">tune</span>
       </button>
     </div>

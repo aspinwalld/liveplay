@@ -1047,8 +1047,11 @@ json ProjectState::default_empty_document() {
         {"playbackKeys",  json::object()},
         {"cartOnlyItems", json::array()},
         {"theme",         json{{"mode", "dark"}, {"accentColor", "#DA1E28"}}},
+        // No defaultOutputDevice: where audio goes is the Main bus's output,
+        // and the binding from a logical output to hardware belongs to the
+        // machine, not the show. previewDevice / ltcDevice are still device
+        // names pending the same treatment.
         {"settings",      json{
-            {"defaultOutputDevice", nullptr},
             {"previewDevice",       nullptr},
             {"ltcDevice",           nullptr},
         }},
@@ -1808,7 +1811,17 @@ bool ProjectState::replace_full_document(const json& doc) {
     if (!doc.is_object()) return false;
     {
         std::lock_guard lock{mutex_};
+        // A document that does not mention buses is not asserting that there
+        // are none — the client round-trips the project on every ordinary save
+        // and does not carry the bus list, so taking absence literally wiped
+        // every bus the moment anything else was edited. Buses are mutated
+        // through their own endpoints; an absent key means "unchanged".
+        json carried_buses;
+        if (!doc.contains("buses") && document_.contains("buses")) {
+            carried_buses = document_["buses"];
+        }
         document_ = doc;
+        if (!carried_buses.is_null()) document_["buses"] = std::move(carried_buses);
         if (!document_.contains("settings")) {
             document_["settings"] = json{
                 {"defaultOutputDevice", nullptr},
@@ -2545,15 +2558,14 @@ bool ProjectState::play_item(const std::string& uuid,
     }
     // "no-ducking" → do nothing.
 
-    // Bus assignment decides routing when the item (or an ancestor group) has
-    // one. Items with no assignment resolve to Main, which deliberately falls
-    // through to the legacy device-override / default-device path below so
-    // every existing project behaves exactly as it did.
+    // Bus assignment is the whole of an item's routing. Everything resolves to
+    // a bus — Main when nothing along the chain says otherwise — and the bus
+    // decides where the audio goes. Where a project used to name an output
+    // device, that is now the Main bus's output, set on load.
     audio::MixerChannelId bus_mixer;
     {
         std::lock_guard lock{mutex_};
-        const auto bus_id = resolve_item_bus(uuid);
-        if (bus_id != kMainBusId) bus_mixer = mixer_for_bus(bus_id);
+        bus_mixer = mixer_for_bus(resolve_item_bus(uuid));
     }
     if (!bus_mixer.empty()) {
         route_cue_to_mixer(target_cue, bus_mixer);
@@ -3545,6 +3557,32 @@ void ProjectState::load_buses_locked() {
     ensure_system(kMainBusId,    "Main",    0);
     ensure_system(kMonitorBusId, "Monitor", 1'000'000);
 
+    // A project that named a default output device gets it moved onto Main,
+    // as a logical output. Because an unmapped name resolves back to a device
+    // of the same name, the audio keeps coming out of the same place — but the
+    // project no longer decides which hardware that is, which is the point:
+    // output binding belongs to the machine, not the show.
+    if (document_.contains("settings") && document_["settings"].is_object()) {
+        auto& settings = document_["settings"];
+        if (settings.contains("defaultOutputDevice") &&
+            settings["defaultOutputDevice"].is_string()) {
+            const auto device = settings["defaultOutputDevice"].get<std::string>();
+            settings.erase("defaultOutputDevice");
+            if (!device.empty()) {
+                for (auto& b : buses_) {
+                    if (b.id != kMainBusId) continue;
+                    if (b.output_kind == BusOutputKind::Master) {
+                        b.output_kind   = BusOutputKind::Output;
+                        b.output_target = device;
+                        Logger::info("migrated settings.defaultOutputDevice '{}' onto the Main bus",
+                                     device);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     migrate_device_overrides_locked();
 
     std::stable_sort(buses_.begin(), buses_.end(),
@@ -3775,13 +3813,6 @@ void ProjectState::materialise_buses() {
 
     std::unordered_map<std::string, BusRouting> created;
     for (const auto& b : defs) {
-        // Main has no strip of its own yet: it is the engine's auto-created
-        // "Main" mixer, and play_item() deliberately routes unassigned items
-        // through the legacy default-device path so existing projects behave
-        // identically. Creating one here would just add an idle duplicate.
-        // Revisit when Main gains a real output of its own.
-        if (b.id == kMainBusId) continue;
-
         BusRouting r;
         r.mixer = engine_.create_mixer_channel(b.display_name);
         if (r.mixer.empty()) {

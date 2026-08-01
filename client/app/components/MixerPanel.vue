@@ -40,7 +40,7 @@
           :touch="touch"
           :output-names="outputNames"
           @select="selectedId = $event"
-          @open="selectedId = $event"
+          @open="openDetails"
           @patch="onPatch"
         />
         <p v-if="userBuses.length === 0" class="mixer__empty">{{ t('mixer.empty') }}</p>
@@ -70,11 +70,11 @@
       </div>
     </div>
 
-    <!-- Selected bus detail. Overview and Output are real; the rest are
-         labelled placeholders so Stage 5 fills panels rather than inventing
-         navigation late. -->
+    <!-- Selected bus detail. Only in full mode: the three-column layout is
+         unusable squeezed into a docked side pane, so opening it switches the
+         mixer to full width rather than rendering something cramped. -->
     <MixerChannelDetails
-      v-if="selectedBus"
+      v-if="selectedBus && mode === 'full'"
       :bus="selectedBus"
       :buses="buses"
       :output-names="outputNames"
@@ -94,8 +94,16 @@ import MixerChannelDetails from './MixerChannelDetails.vue';
 import StereoMeter from './StereoMeter.vue';
 import CanvasFader from './CanvasFader.vue';
 
-withDefaults(defineProps<{ mode?: 'side' | 'full' }>(), { mode: 'side' });
-defineEmits<{ (e: 'close'): void; (e: 'mode', mode: 'side' | 'full'): void }>();
+const props = withDefaults(defineProps<{ mode?: 'side' | 'full' }>(), { mode: 'side' });
+const emit = defineEmits<{ (e: 'close'): void; (e: 'mode', mode: 'side' | 'full'): void }>();
+
+// Opening channel details from a docked pane switches to full width first —
+// the detail layout needs the room, and silently rendering it crushed was
+// worse than not showing it.
+function openDetails(id: string) {
+  selectedId.value = id;
+  if (props.mode !== 'full') emit('mode', 'full');
+}
 
 const server = useLiveplayServer();
 const { t } = useLocalization();
@@ -104,7 +112,14 @@ const touch = computed(() => uiMode.value === 'playback');
 
 const selectedId  = ref('');
 const outputNames = ref<string[]>([]);
-const masterGainDb = ref(0);
+
+// The master strip drives the *same* parameter as the transport bar's Main
+// fader — the output-channel gain on masters 0/1 — rather than the engine's
+// global master gain. Two faders both labelled master that moved independently
+// was just confusing. outputChannelGains is reactive and kept live by the
+// output_channel_gain_changed broadcast, so the two track each other in both
+// directions and across clients.
+const masterGainDb = computed(() => server.outputChannelGains[0] ?? 0);
 
 const buses = computed<Bus[]>(() => server.buses ?? []);
 
@@ -117,7 +132,7 @@ const userBuses = computed(() => buses.value.filter(b => !b.system && b.mixerId)
 
 const masterGainLabel = computed(() =>
   masterGainDb.value <= -60 ? '-∞'
-    : (masterGainDb.value > 0 ? '+' : '') + masterGainDb.value.toFixed(1));
+    : (masterGainDb.value > 0 ? '+' : '') + Number(masterGainDb.value).toFixed(1));
 const selectedBus = computed(() => buses.value.find(b => b.id === selectedId.value) ?? null);
 
 onMounted(async () => {
@@ -126,7 +141,6 @@ onMounted(async () => {
     const map = await server.fetchOutputs();
     outputNames.value = (map?.outputs ?? []).map(o => o.name);
   } catch { outputNames.value = []; }
-  try { masterGainDb.value = await server.fetchMasterGainDb(); } catch { /* keep 0 */ }
 });
 
 async function onPatch(id: string, patch: Partial<Bus>) {
@@ -141,8 +155,9 @@ async function addBus() {
   selectedId.value = id;
 }
 function onMasterGain(db: number) {
-  masterGainDb.value = db;
-  void server.setMasterGainDb(db);
+  // Both channels of the pair move together, matching the transport bar.
+  void server.setOutputChannelGainDb(0, db);
+  void server.setOutputChannelGainDb(1, db);
 }
 </script>
 
