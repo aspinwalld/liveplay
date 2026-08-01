@@ -1332,11 +1332,18 @@ export const useProject = () => {
   };
   const itemsToJSON = _deepToRaw;
 
-  const isCartWindowMode = import.meta.client
-    ? new URLSearchParams(window.location.search).get('cartWindow') === '1'
+  // Detached windows (cart player, mixer) receive a one-shot copy of the
+  // project over IPC rather than owning it. Installing the sync watchers there
+  // would diff that copy against itself and push phantom edits to the server,
+  // so every secondary window opts out.
+  const isSecondaryWindow = import.meta.client
+    ? (() => {
+        const q = new URLSearchParams(window.location.search);
+        return q.get('cartWindow') === '1' || q.get('mixerWindow') === '1';
+      })()
     : false;
 
-  if (import.meta.client && !_syncWatchersInstalled && !isCartWindowMode) {
+  if (import.meta.client && !_syncWatchersInstalled && !isSecondaryWindow) {
     _syncWatchersInstalled = true;
     // Per-section debounced sync timers.
     let itemsTimer:    ReturnType<typeof setTimeout> | null = null;

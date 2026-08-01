@@ -31,8 +31,8 @@
       <Btn
         icon="graphic_eq"
         :text="t('mixer.title')"
-        :class="{ 'btn--active': mixerOpen }"
-        @click="mixerOpen = !mixerOpen"
+        :class="{ 'btn--active': mixerOpen || mixerDetached }"
+        @click="toggleMixer"
       />
       <Btn icon="tune" :text="t('settings.title')" @click="showProjectSettings = true" />
       <Btn icon="keyboard" :text="t('controls.shortcutBtn')" @click="showControlConfig = true" />
@@ -113,6 +113,17 @@ const showControlConfig = ref(false);
 const showProjectSettings = useState('showProjectSettings', () => false);
 // Shared with MainWorkspace, which swaps the mixer in for the playlist/cart.
 const mixerOpen = useState<boolean>('liveplay:mixerOpen', () => false);
+const mixerDetached = useState<boolean>('liveplay:mixerDetached', () => false);
+
+// While the mixer is popped out, this button raises that window rather than
+// toggling a panel that MainWorkspace is deliberately not drawing.
+function toggleMixer() {
+  if (mixerDetached.value) {
+    void (window as any).electronAPI?.openMixerWindow?.();
+    return;
+  }
+  mixerOpen.value = !mixerOpen.value;
+}
 
 const isDark = computed(() => currentProject.value?.theme.mode === 'dark');
 const currentTime = ref('00:00:00');

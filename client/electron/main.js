@@ -1135,6 +1135,7 @@ const pendingApiRequests = new Map(); // requestId → { resolve } for PATCH rou
 let fileToOpen = null; // Store file path if app is opened with a file
 let stateViewerWindow = null; // Debug state viewer window
 let cartPlayerWindow = null;  // Detached cart player window
+let mixerWindow = null;       // Detached mixer window
 
 // Flatten all audio items from a nested project items array
 function flattenAudioItems(items) {
@@ -1618,6 +1619,59 @@ function createCartPlayerWindow() {
   cartPlayerWindow.webContents.once('did-finish-load', () => {
     if (mainWindow) {
       mainWindow.webContents.send('cart-player-window-opened');
+    }
+  });
+}
+
+// Create detached mixer window.
+//
+// Unlike the cart window this one needs almost nothing from us: buses, meters
+// and fader moves all travel over the renderer's own WebSocket to the audio
+// server, which every window opens independently. The only thing it takes from
+// the main window is the project's look (theme + accent) and the meter zone
+// levels, which ride along on the existing cart-window project-data channel.
+function createMixerWindow() {
+  if (mixerWindow) {
+    mixerWindow.focus();
+    return;
+  }
+
+  mixerWindow = new BrowserWindow({
+    width: 1000,
+    height: 720,
+    minWidth: 420,
+    minHeight: 460,
+    title: 'LivePlay - Mixer',
+    icon: path.join(__dirname, '../assets/icons/2x/app_icon_darkmode@2x.png'),
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      webSecurity: false
+    }
+  });
+
+  if (isDevMode) {
+    mixerWindow.loadURL('http://localhost:3000/?mixerWindow=1');
+  } else {
+    const indexPath = path.join(__dirname, '../.output/public/index.html');
+    mixerWindow.loadFile(indexPath, { query: { mixerWindow: '1' } });
+  }
+
+  mixerWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.error('[MixerWindow] Failed to load:', errorCode, errorDescription);
+  });
+
+  mixerWindow.on('closed', () => {
+    mixerWindow = null;
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('mixer-window-closed');
+    }
+  });
+
+  mixerWindow.webContents.once('did-finish-load', () => {
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('mixer-window-opened');
     }
   });
 }
@@ -2642,9 +2696,15 @@ ipcMain.on('sync-project-data', (event, projectData) => {
     } else {
       currentProject = nextOpen;
     }
-    // Forward project updates to the detached cart window if open
-    if (cartPlayerWindow && projectData) {
-      cartPlayerWindow.webContents.send('cart-window-project-update', projectData);
+    // Forward project updates to the detached windows if open. The mixer
+    // window takes only the theme and meter levels off this, but it is the
+    // same payload, so it rides the same channel.
+    if (projectData) {
+      for (const win of [cartPlayerWindow, mixerWindow]) {
+        if (win && !win.webContents.isDestroyed()) {
+          win.webContents.send('cart-window-project-update', projectData);
+        }
+      }
     }
   }
   // Silently ignore syncs from the cart window to prevent feedback loops
@@ -2658,6 +2718,17 @@ ipcMain.handle('open-cart-player-window', () => {
 ipcMain.on('cart-player-window-attach', () => {
   if (cartPlayerWindow) {
     cartPlayerWindow.close();
+  }
+});
+
+// Mixer window IPC handlers
+ipcMain.handle('open-mixer-window', () => {
+  createMixerWindow();
+});
+
+ipcMain.on('mixer-window-attach', () => {
+  if (mixerWindow) {
+    mixerWindow.close();
   }
 });
 

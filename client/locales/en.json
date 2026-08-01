@@ -551,6 +551,8 @@
     "close": "Close",
     "expand": "Expand to full width",
     "dock": "Dock to the side",
+    "detach": "Open in a separate window",
+    "dockToMain": "Dock back into the main window",
     "renameHint": "Double-click to rename",
     "systemBus": "System bus",
     "toHardware": "Hardware",

@@ -16,17 +16,33 @@
         <span>{{ t('mixer.addBus') }}</span>
       </button>
       <div class="mixer__spacer"></div>
+
+      <!-- Detached: the window IS the mixer, so the side/full toggle has
+           nothing to toggle between and the only exit is back to the main
+           window. Docked: offer detach, the size toggle, and close. -->
+      <template v-if="!detached">
+        <button v-if="canDetach" class="mixer__close" :title="t('mixer.detach')" @click="detach">
+          <span class="material-symbols-rounded">open_in_new</span>
+        </button>
+        <button
+          class="mixer__close"
+          :title="mode === 'side' ? t('mixer.expand') : t('mixer.dock')"
+          @click="$emit('mode', mode === 'side' ? 'full' : 'side')"
+        >
+          <span class="material-symbols-rounded">
+            {{ mode === 'side' ? 'open_in_full' : 'close_fullscreen' }}
+          </span>
+        </button>
+      </template>
+
       <button
         class="mixer__close"
-        :title="mode === 'side' ? t('mixer.expand') : t('mixer.dock')"
-        @click="$emit('mode', mode === 'side' ? 'full' : 'side')"
+        :title="detached ? t('mixer.dockToMain') : t('mixer.close')"
+        @click="$emit('close')"
       >
         <span class="material-symbols-rounded">
-          {{ mode === 'side' ? 'open_in_full' : 'close_fullscreen' }}
+          {{ detached ? 'dock_to_left' : 'close' }}
         </span>
-      </button>
-      <button class="mixer__close" :title="t('mixer.close')" @click="$emit('close')">
-        <span class="material-symbols-rounded">close</span>
       </button>
     </header>
 
@@ -110,8 +126,23 @@ import {
   FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
 } from '~/utils/meterScale';
 
-const props = withDefaults(defineProps<{ mode?: 'side' | 'full' }>(), { mode: 'side' });
+const props = withDefaults(
+  defineProps<{ mode?: 'side' | 'full'; detached?: boolean }>(),
+  { mode: 'side', detached: false },
+);
 const emit = defineEmits<{ (e: 'close'): void; (e: 'mode', mode: 'side' | 'full'): void }>();
+
+// Detaching is an Electron affordance — in a browser there is no second
+// window to open, so the button simply isn't offered there.
+const canDetach = computed(() =>
+  import.meta.client && !!(window as any).electronAPI?.openMixerWindow);
+
+// The main window flips its own panel off when it hears `mixer-window-opened`,
+// so we don't touch mixerOpen here — that keeps the detach path identical
+// whether the window is spawned from this button or reopened later.
+function detach() {
+  void (window as any).electronAPI?.openMixerWindow?.();
+}
 
 // Opening channel details from a docked pane switches to full width first —
 // the detail layout needs the room, and silently rendering it crushed was

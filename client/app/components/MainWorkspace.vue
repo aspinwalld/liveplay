@@ -10,7 +10,7 @@
 
     <!-- Mixer, full width. Useful once there are enough buses that strips need
          the whole window. -->
-    <div v-if="mixerOpen && mixerMode === 'full'" class="workspace-content">
+    <div v-if="mixerOpen && !mixerDetached && mixerMode === 'full'" class="workspace-content">
       <MixerPanel :mode="mixerMode" @close="mixerOpen = false" @mode="setMixerMode" />
     </div>
 
@@ -32,7 +32,7 @@
 
       <!-- Docked mixer: a resizable right-hand pane, so a rig with a handful of
            buses can leave it up permanently instead of swapping views. -->
-      <template v-if="mixerOpen && mixerMode === 'side'">
+      <template v-if="mixerOpen && !mixerDetached && mixerMode === 'side'">
         <div
           class="resize-handle mixer-resize-handle"
           :class="{ dragging: isMixerResizing }"
@@ -120,6 +120,10 @@ const mixerOpen = useState<boolean>('liveplay:mixerOpen', () => false);
 // stay up permanently); 'full' gives it the whole workspace. Per-device, so it
 // is remembered locally rather than travelling in the project.
 const mixerMode = useState<'side' | 'full'>('liveplay:mixerMode', () => 'side');
+// Popped out into its own window: the in-app panel steps aside rather than
+// drawing a second copy of the same faders. Shared with ProjectHeader, whose
+// toggle focuses the window instead of opening the panel while this is true.
+const mixerDetached = useState<boolean>('liveplay:mixerDetached', () => false);
 const mixerWidth = ref(420);
 const isMixerResizing = ref(false);
 
@@ -270,6 +274,15 @@ if (import.meta.client && window.electronAPI) {
   });
   window.electronAPI.onCartPlayerWindowClosed(() => {
     cartDetached.value = false;
+  });
+
+  // Mixer window detach/attach. mixerOpen is left alone on both edges, so
+  // closing the detached window puts the panel back exactly where it was.
+  window.electronAPI.onMixerWindowOpened?.(() => {
+    mixerDetached.value = true;
+  });
+  window.electronAPI.onMixerWindowClosed?.(() => {
+    mixerDetached.value = false;
   });
 
   // Listen for API triggers

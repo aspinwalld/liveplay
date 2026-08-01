@@ -26,8 +26,9 @@ group's, else Main. Full CRUD over REST with `buses_patched` broadcast. Master p
 a bus's lifetime and returned to a free list on delete or rewire.
 
 **Stage 2 — mixer.** `MixerPanel` / `MixerStrip` / `MixerChannelDetails`, docking as a resizable
-side pane or taking the full workspace. Per-lane meters. The legacy `RoutingMatrixPanel` and the
-per-item device-override control are deleted.
+side pane, taking the full workspace, or popping out into its own Electron window
+(`?mixerWindow=1`). Per-lane meters. The legacy `RoutingMatrixPanel` and the per-item
+device-override control are deleted.
 
 ### 0.2 Decisions taken during implementation
 
@@ -43,12 +44,11 @@ per-item device-override control are deleted.
 | **One dB scale shared by meter and fader.** Fader and scale span −60…+12; the meter is dBFS, tops out at 0, and its track covers only that part of the range. | 0 dBFS lands on the 0 tick, the meter keeps full resolution, and no dead strip sits above it. Only sound while both map dB to position linearly — see `client/app/utils/meterScale.ts`. |
 | **Per-lane meters replace the combined read in the broadcaster.** | Both reset max-since-read; calling them in sequence would leave the second reading silence. Combined values are derived from the lanes. |
 | **`LiveMeterBar` reads output-target zone levels** instead of hardcoded −40/−18/−9. | It disagreed with `StereoMeter` about where "hot" starts on every target except the default. |
+| **The detached mixer window still takes the cart window's project-data IPC**, despite needing no document to function. | Meter zone colours come from `settings.outputTargetLevels`, and theme/accent from `theme` — without them the popped-out meters would colour off the EBU defaults and disagree with the same meter in the main window. Buses, meters and fader moves do go over that window's own WebSocket. |
+| **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
 
 ### 0.3 Not done
 
-- **Detachable mixer window.** Should be simpler than the cart pop-out it copies: the cart needs
-  IPC project sync because it needs the document, but the mixer only needs buses and meters, which
-  already arrive over the WebSocket — so it can open its own connection. §8.6
 - **`Knob.vue`** — still the one component that must be built from scratch; needed for pan and all
   of Stage 5. §8.2
 - **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
@@ -627,20 +627,26 @@ Stage 5 fills panels rather than inventing navigation late.
   detached mixer window on a large display.
 - **`EqCurve.vue` / `DynamicsCurve.vue`** — the graph displays. Placeholders in Stage 2.
 
-### 8.6 Detaching it
+### 8.6 Detaching it — built
 
-The cart grid's pop-out is the recipe: `createCartPlayerWindow()` spawns a `BrowserWindow` on
-`index.html?cartWindow=1` ([main.js:1578-1622](client/electron/main.js#L1578-L1622)) and `app.vue`
-branches on the flag ([app.vue:4-27](client/app/app.vue#L4-L27)). A mixer window repeats it with
-`?mixerWindow=1`.
+`createMixerWindow()` spawns a `BrowserWindow` on `index.html?mixerWindow=1`, following the cart
+grid's pop-out, and `app.vue` branches on the flag to render `MixerPanel` alone in `mode="full"`.
+`open-mixer-window` / `mixer-window-attach` mirror the cart's IPC pair, and `mixer-window-opened` /
+`mixer-window-closed` drive `mixerDetached` in the main window.
 
-One simplification: the cart window needs IPC project-data sync because it needs the document. A
-mixer needs live meters and gains, which already arrive over the WebSocket — so it can open its own
-`useLiveplayServer` connection and skip that machinery. It still needs the theme/accent
-re-application the cart window does ([app.vue:275-280](client/app/app.vue#L275-L280)), since those
-are applied per window to `documentElement`.
+What that window needs from the main process turned out to be less than the cart, but not nothing.
+Buses, meters and fader moves all go over its own `useLiveplayServer` socket — every window opens
+one, and the Nuxt plugin points it at the right URL before the app mounts. But meter zone colours
+come from `settings.outputTargetLevels` and the look from `theme`, both of which live in the
+project, so the window subscribes to the cart's existing project-data broadcast and applies it. The
+sync watchers in `useProject` are skipped in *any* secondary window (`cartWindow` or `mixerWindow`);
+without that the window would diff its IPC copy against itself and push phantom edits.
 
-A detached window is also where larger faders matter most — see the `width` prop above.
+Consequence worth remembering: everything the detached mixer draws that is *not* bus state degrades
+to defaults when the main window has no project open. That is the right failure — the faders still
+work, because they never depended on the document.
+
+A detached window is also where larger faders matter most — see the `width` prop above; still 20px.
 
 ### 8.7 Localisation
 
