@@ -16,6 +16,15 @@
         <span>{{ t('mixer.addBus') }}</span>
       </button>
       <div class="mixer__spacer"></div>
+      <button
+        class="mixer__close"
+        :title="mode === 'side' ? t('mixer.expand') : t('mixer.dock')"
+        @click="$emit('mode', mode === 'side' ? 'full' : 'side')"
+      >
+        <span class="material-symbols-rounded">
+          {{ mode === 'side' ? 'open_in_full' : 'close_fullscreen' }}
+        </span>
+      </button>
       <button class="mixer__close" :title="t('mixer.close')" @click="$emit('close')">
         <span class="material-symbols-rounded">close</span>
       </button>
@@ -78,7 +87,8 @@ import MixerChannelDetails from './MixerChannelDetails.vue';
 import StereoMeter from './StereoMeter.vue';
 import VolumeSlider from './VolumeSlider.vue';
 
-defineEmits<{ (e: 'close'): void }>();
+withDefaults(defineProps<{ mode?: 'side' | 'full' }>(), { mode: 'side' });
+defineEmits<{ (e: 'close'): void; (e: 'mode', mode: 'side' | 'full'): void }>();
 
 const server = useLiveplayServer();
 const { t } = useLocalization();
@@ -126,6 +136,11 @@ function onMasterGain(db: number) {
 .mixer {
   display: flex;
   flex-direction: column;
+  /* flex:1 + min-width:0 matter: as a lone item in the row-flex workspace the
+     panel would otherwise shrink-wrap its content, leaving the rest of the
+     container showing through un-themed. */
+  flex: 1;
+  min-width: 0;
   height: 100%;
   background: var(--color-background);
   overflow: hidden;
@@ -155,13 +170,17 @@ function onMasterGain(db: number) {
 }
 .mixer__add:hover, .mixer__close:hover { color: var(--color-text-primary); }
 
-.mixer__body { display: flex; flex: 1; min-height: 0; }
+.mixer__body { display: flex; flex: 1; min-height: 0; min-width: 0; }
 .mixer__strips {
   display: flex;
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
-  overflow-x: auto;
+  /* min-width:0 is what actually lets this scroll: without it the flex item
+     refuses to shrink below its content and the strips squash instead. */
   flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  align-items: stretch;
 }
 .mixer__empty {
   align-self: center;

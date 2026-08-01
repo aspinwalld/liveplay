@@ -542,6 +542,8 @@
   "mixer": {
     "title": "Mixer",
     "close": "Close",
+    "expand": "Expand to full width",
+    "dock": "Dock to the side",
     "addBus": "Add bus",
     "newBusName": "New Bus",
     "master": "Master",

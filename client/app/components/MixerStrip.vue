@@ -57,7 +57,7 @@
       <button
         class="strip__btn"
         :class="{ 'strip__btn--mute': bus.mute }"
-        @click.stop="$emit('patch', bus.id, { mute: !bus.mute })"
+        @click.stop="onMute"
       >{{ t('mixer.mute') }}</button>
       <button
         class="strip__btn"
@@ -79,12 +79,12 @@
       />
       <div v-else class="strip__nometer" :title="t('mixer.noStrip')"></div>
       <CanvasFader
-        :db="bus.gainDb"
+        :db="gainDb"
         :min-db="-60"
         :max-db="6"
         :width="touch ? 32 : 20"
-        @input="(db: number) => $emit('patch', bus.id, { gainDb: db })"
-        @reset="$emit('patch', bus.id, { gainDb: 0 })"
+        @input="onFader"
+        @reset="onFader(0)"
       />
     </div>
 
@@ -100,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import LiveMeterBar from './LiveMeterBar.vue';
@@ -122,9 +122,46 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useLocalization();
+const server = useLiveplayServer();
+
+// The fader is driven locally while it moves. Binding it straight to
+// bus.gainDb meant every drag event did a PATCH plus a full bus refetch, and
+// the knob snapped back to the stale value until the round-trip landed —
+// unusable, and brutal on the server.
+//
+// So: the engine gets the level immediately (a strip-only call that writes no
+// document and triggers no refetch) and the bus is persisted once the gesture
+// settles.
+const gainDb  = ref(props.bus.gainDb);
+let   holding = false;
+let   settle: ReturnType<typeof setTimeout> | null = null;
+
+watch(() => props.bus.gainDb, v => { if (!holding) gainDb.value = v; });
+
+function onFader(db: number) {
+  gainDb.value = db;
+  holding = true;
+  if (props.bus.mixerId) void server.setMixerGainDb(props.bus.mixerId, db).catch(() => {});
+  if (settle) clearTimeout(settle);
+  settle = setTimeout(() => {
+    settle  = null;
+    holding = false;
+    emit('patch', props.bus.id, { gainDb: gainDb.value });
+  }, 250);
+}
+
+onBeforeUnmount(() => { if (settle) clearTimeout(settle); });
+
+// Mute goes to the engine first so it takes effect on the click rather than
+// after the document round-trip, then persists.
+function onMute() {
+  const next = !props.bus.mute;
+  if (props.bus.mixerId) void server.setMixerMute(props.bus.mixerId, next).catch(() => {});
+  emit('patch', props.bus.id, { mute: next });
+}
 
 const gainLabel = computed(() => {
-  const v = props.bus.gainDb;
+  const v = gainDb.value;
   if (v <= -60) return '-∞';
   return (v > 0 ? '+' : '') + v.toFixed(1);
 });

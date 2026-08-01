@@ -842,6 +842,22 @@ function createClient() {
     fetchMixerChannels().catch(() => {});
   }
 
+  // Live strip level / mute. These hit the engine only — no document write, no
+  // refetch — so they are cheap enough to call while a fader is moving. The
+  // owning bus is persisted separately once the gesture settles.
+  async function setMixerGainDb(mixerId: MixerChannelId, db: number) {
+    return rest(`/api/mixers/${encodeURIComponent(mixerId)}/gain`, {
+      method: 'POST',
+      body: JSON.stringify({ db }),
+    });
+  }
+  async function setMixerMute(mixerId: MixerChannelId, muted: boolean) {
+    return rest(`/api/mixers/${encodeURIComponent(mixerId)}/mute`, {
+      method: 'POST',
+      body: JSON.stringify({ muted }),
+    });
+  }
+
   // ---- Buses --------------------------------------------------------
   // The user-facing mixer. Every mutation is authoritative on the server, so
   // the local list is refreshed from it rather than patched optimistically —
@@ -1178,6 +1194,9 @@ function createClient() {
     outputChannelGains,
     setOutputChannelGainDb,
     masterBus,
+
+    setMixerGainDb,
+    setMixerMute,
 
     // buses
     buses,
