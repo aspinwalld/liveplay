@@ -30,7 +30,31 @@
     <template v-else>
       <WelcomeScreen v-if="!currentProject" />
       <MainWorkspace v-else />
-    
+
+      <!-- TEMPORARY (remove before merge): RoutingMatrixPanel has never been
+           mounted anywhere, so it has never actually been seen. Append
+           ?routingMatrix=1 to the URL to render it over the workspace for a
+           look. Scaffolding for the bus/mixer design review only. -->
+      <div v-if="showRoutingMatrix" class="routing-matrix-preview" @click.self="showRoutingMatrix = false">
+        <div class="routing-matrix-preview__sheet">
+          <div class="routing-matrix-preview__bar">
+            <strong>RoutingMatrixPanel preview</strong>
+            <select v-model="routingPreviewCueId">
+              <option v-for="c in serverRoot.cues" :key="c.id" :value="c.id">
+                {{ c.display_name || c.id }}
+              </option>
+            </select>
+            <button @click="showRoutingMatrix = false">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+          <div class="routing-matrix-preview__body">
+            <RoutingMatrixPanel v-if="routingPreviewCueId" :cue-id="routingPreviewCueId" />
+            <p v-else>No cues loaded — open a project with at least one audio item.</p>
+          </div>
+        </div>
+      </div>
+
     <!-- Accent Color Picker Modal -->
     <div v-if="showColorPicker" class="color-picker-overlay" @click="showColorPicker = false">
       <div class="color-picker-dialog" @click.stop>
@@ -172,6 +196,22 @@
 <script setup lang="ts">
 import 'material-symbols';
 import CartPlayer from './components/CartPlayer.vue';
+// TEMPORARY (remove before merge) — see the ?routingMatrix=1 preview above.
+import RoutingMatrixPanel from './components/RoutingMatrixPanel.vue';
+import { useLiveplayServer } from '~/composables/useLiveplayServer';
+
+const serverRoot = useLiveplayServer();
+const showRoutingMatrix = ref(false);
+const routingPreviewCueId = ref<string>('');
+onMounted(() => {
+  if (typeof window === 'undefined') return;
+  showRoutingMatrix.value =
+    new URLSearchParams(window.location.search).get('routingMatrix') === '1';
+  if (showRoutingMatrix.value) void serverRoot.fetchCues();
+});
+watch(() => serverRoot.cues, list => {
+  if (!routingPreviewCueId.value && list?.length) routingPreviewCueId.value = list[0].id;
+}, { immediate: true, deep: true });
 
 const {
   currentProject, saveProject, openProject, closeProject, confirmUnsavedChanges,
@@ -642,6 +682,47 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+/* TEMPORARY (remove before merge) — ?routingMatrix=1 preview shell. */
+.routing-matrix-preview {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.routing-matrix-preview__sheet {
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-lg);
+  overflow: hidden;
+}
+.routing-matrix-preview__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+}
+.routing-matrix-preview__bar select { margin-left: auto; }
+.routing-matrix-preview__bar button {
+  display: flex;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.routing-matrix-preview__body {
+  padding: var(--spacing-md);
+  overflow: auto;
 }
 
 .color-picker-overlay {
