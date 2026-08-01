@@ -66,6 +66,43 @@ struct MixerChannelMeta {
     bool                  soloed  = false;
 };
 
+// ---------------------------------------------------------------------------
+// Buses. A bus is the user-facing name for an engine mixer strip: items and
+// groups are assigned to one, and the bus alone decides where that audio goes.
+// Definitions live in the project document and are materialised onto engine
+// mixer channels on load.
+//
+// Where a bus feeds is always expressed logically — either the master bus,
+// another bus, or a *named* output like "FOH". The name→hardware binding lives
+// on the server, never in the document, so a show stays portable between
+// venues. See BUS_ARCHITECTURE.md.
+// ---------------------------------------------------------------------------
+enum class BusOutputKind {
+    Master,   // into the master bus (inherits the master limiter)
+    Bus,      // submix feeding another bus
+    Output,   // direct to a named logical output
+};
+
+struct BusDef {
+    std::string   id;
+    std::string   display_name;
+    std::string   color;
+    int           order      = 0;
+    int           width      = 2;       // 1 = mono, 2 = stereo. See §2.5.
+    float         gain_db    = 0.0f;
+    bool          muted      = false;
+    BusOutputKind output_kind = BusOutputKind::Master;
+    std::string   output_target;        // bus id, or logical output name
+    // System buses (Main, Monitor) are created implicitly and cannot be
+    // deleted or renamed away — the document may still carry their level.
+    bool          system     = false;
+};
+
+// The always-present buses. Main is where everything lands by default;
+// Monitor is the PFL / pre-listen destination.
+inline constexpr const char* kMainBusId    = "main";
+inline constexpr const char* kMonitorBusId = "monitor";
+
 struct RouteSendV2 {
     audio::ChannelIndex source_channel;
     audio::MixerChannelId destination_mixer;
@@ -385,6 +422,17 @@ public:
 
     std::vector<MixerChannelMeta> list_mixer_channels() const;
 
+    // Bus definitions in display order, each with the uuids of the items that
+    // resolve to it (an item's own busId, else the nearest ancestor group's,
+    // else Main). The membership list is what the mixer's channel-detail view
+    // shows as "what feeds this bus".
+    struct BusInfo {
+        BusDef                   def;
+        audio::MixerChannelId    mixer;      // empty when not materialised
+        std::vector<std::string> item_uuids;
+    };
+    std::vector<BusInfo> list_buses() const;
+
     std::filesystem::path media_root() const;
     void set_media_root(std::filesystem::path p);
 
@@ -475,6 +523,28 @@ private:
         audio::MasterChannelIndex  master_r;
     };
     std::unordered_map<std::string, DeviceRouting> device_routings_;
+
+    // ---- Buses -----------------------------------------------------------
+    // Definitions as loaded from the document, in display order, and the
+    // engine mixer strip each one was materialised onto. Both guarded by
+    // mutex_ and rebuilt whenever the document is loaded or replaced.
+    std::vector<BusDef>                                    buses_;
+    std::unordered_map<std::string, audio::MixerChannelId> bus_mixers_;
+
+    // Read document_["buses"] into buses_, synthesising the system buses and
+    // migrating legacy per-item deviceOverride values into real buses. Caller
+    // holds mutex_.
+    void load_buses_locked();
+    // Create an engine mixer strip per bus and wire its output. Caller must
+    // NOT hold mutex_ (engine calls take their own locks).
+    void materialise_buses();
+    // Serialise buses_ back into document_["buses"]. Caller holds mutex_.
+    void write_buses_to_document_locked();
+    // Resolve an item's effective bus by walking up its group ancestry.
+    // Returns the Main bus when nothing along the chain assigns one.
+    std::string resolve_item_bus(const std::string& item_uuid) const;
+    // Engine strip for a bus id, or empty if unknown / not materialised.
+    audio::MixerChannelId mixer_for_bus(const std::string& bus_id) const;
     // Next free master channel pair when allocating new device routings.
     // Default device occupies 0/1; preview occupies the top pair of the bus
     // (see audio::preview_master_base); overrides start here and step by 2.

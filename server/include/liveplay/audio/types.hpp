@@ -41,6 +41,12 @@ inline constexpr ChannelCount kMinMasterChannels       = 4;
 // allocate mid-block; creating a strip beyond the cap is refused instead.
 inline constexpr std::uint32_t kDefaultMaxMixerChannels = 64;
 
+// Power-preserving pan / downmix law. Governs both folding a stereo source to
+// mono and placing a mono source at the centre of a stereo destination, so the
+// two stay consistent. Referenced by symbol everywhere rather than written as
+// a literal, because this is intended to become a server config value.
+inline constexpr float kDefaultDownmixDb = -3.0f;
+
 // Mixer strips carry this many parallel audio lanes (stereo: L=0, R=1).
 // Item→mixer and mixer→master sends address a specific lane; kAllMixerLanes
 // fans the send across every lane — used for mono sources (centre image) and

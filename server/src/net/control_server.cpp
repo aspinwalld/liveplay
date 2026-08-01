@@ -1555,6 +1555,37 @@ void ControlServer::install_routes() {
             } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 
+    // ---- Buses ----
+    // The user-facing view of the mixer: every bus in display order, with the
+    // items that resolve to it (own assignment, inherited from a group, or the
+    // Main fallback).
+    CROW_ROUTE(app, "/api/buses").methods(crow::HTTPMethod::Get)
+        ([this] {
+            try {
+                json arr = json::array();
+                for (const auto& b : state_.list_buses()) {
+                    const char* kind =
+                        b.def.output_kind == core::BusOutputKind::Bus    ? "bus"
+                      : b.def.output_kind == core::BusOutputKind::Output ? "output"
+                                                                         : "master";
+                    arr.push_back(json{
+                        {"id",       b.def.id},
+                        {"name",     b.def.display_name},
+                        {"color",    b.def.color},
+                        {"order",    b.def.order},
+                        {"width",    b.def.width},
+                        {"gainDb",   b.def.gain_db},
+                        {"mute",     b.def.muted},
+                        {"system",   b.def.system},
+                        {"output",   json{{"type", kind}, {"target", b.def.output_target}}},
+                        {"mixerId",  b.mixer.value},
+                        {"itemUuids", b.item_uuids},
+                    });
+                }
+                return json_ok(arr);
+            } catch (const std::exception& e) { return json_err(500, e.what()); }
+        });
+
     // ---- Mixer channels ----
     CROW_ROUTE(app, "/api/mixers").methods(crow::HTTPMethod::Get)
         ([this] {

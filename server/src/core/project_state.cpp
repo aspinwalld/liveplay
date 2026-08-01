@@ -1006,6 +1006,9 @@ void ProjectState::reset() {
     master_assignments_.clear();
     item_uuid_to_cue_.clear();
     release_device_routings_locked();
+    for (auto& [_, mixer] : bus_mixers_) engine_.remove_mixer_channel(mixer);
+    bus_mixers_.clear();
+    buses_.clear();
     // The selection and the trigger-order stamps belong to the project that is
     // going away; carrying them into the next one would leave control surfaces
     // pointing at uuids that no longer exist. Show Mode and the locale are
@@ -2523,8 +2526,19 @@ bool ProjectState::play_item(const std::string& uuid,
     }
     // "no-ducking" → do nothing.
 
-    // Apply per-cue device routing right before play.
-    if (!device_override.empty()) {
+    // Bus assignment decides routing when the item (or an ancestor group) has
+    // one. Items with no assignment resolve to Main, which deliberately falls
+    // through to the legacy device-override / default-device path below so
+    // every existing project behaves exactly as it did.
+    audio::MixerChannelId bus_mixer;
+    {
+        std::lock_guard lock{mutex_};
+        const auto bus_id = resolve_item_bus(uuid);
+        if (bus_id != kMainBusId) bus_mixer = mixer_for_bus(bus_id);
+    }
+    if (!bus_mixer.empty()) {
+        route_cue_to_mixer(target_cue, bus_mixer);
+    } else if (!device_override.empty()) {
         const auto mixer = ensure_device_routing(device_override);
         if (!mixer.empty()) {
             route_cue_to_mixer(target_cue, mixer);
@@ -3451,6 +3465,237 @@ void ProjectState::release_device_routings_locked() {
     next_override_master_ = kFirstOverrideMaster;
 }
 
+// ---------------------------------------------------------------------------
+// Buses
+//
+// A bus is the user-facing name for an engine mixer strip. Items and groups
+// carry a busId and nothing else about routing; the bus decides where the
+// audio goes. Definitions live in document_["buses"] and are materialised onto
+// engine strips whenever a project loads.
+// ---------------------------------------------------------------------------
+void ProjectState::load_buses_locked() {
+    buses_.clear();
+    std::unordered_set<std::string> seen;
+
+    if (document_.contains("buses") && document_["buses"].is_array()) {
+        for (const auto& b : document_["buses"]) {
+            if (!b.is_object()) continue;
+            BusDef d;
+            d.id = b.value("id", std::string{});
+            if (d.id.empty() || seen.count(d.id)) continue;   // drop junk / dupes
+            d.display_name = b.value("name", d.id);
+            d.color        = b.value("color", std::string{});
+            d.order        = b.value("order", 0);
+            d.width        = std::clamp(b.value("width", 2), 1, 2);
+            d.gain_db      = b.value("gainDb", 0.0f);
+            d.muted        = b.value("mute", false);
+            if (b.contains("output") && b["output"].is_object()) {
+                const auto& out = b["output"];
+                const auto kind = out.value("type", std::string{"master"});
+                d.output_kind = kind == "bus"    ? BusOutputKind::Bus
+                              : kind == "output" ? BusOutputKind::Output
+                                                 : BusOutputKind::Master;
+                d.output_target = out.value("target", std::string{});
+            }
+            seen.insert(d.id);
+            buses_.push_back(std::move(d));
+        }
+    }
+
+    // Main and Monitor always exist. A document that already defines them
+    // keeps its levels; one that doesn't gets them synthesised, which is what
+    // makes every pre-bus project load unchanged.
+    const auto ensure_system = [&](const char* id, const char* name, int order) {
+        for (auto& b : buses_) {
+            if (b.id == id) { b.system = true; return; }
+        }
+        BusDef d;
+        d.id           = id;
+        d.display_name = name;
+        d.order        = order;
+        d.system       = true;
+        buses_.push_back(std::move(d));
+    };
+    ensure_system(kMainBusId,    "Main",    0);
+    ensure_system(kMonitorBusId, "Monitor", 1'000'000);
+
+    std::stable_sort(buses_.begin(), buses_.end(),
+                     [](const BusDef& a, const BusDef& b) { return a.order < b.order; });
+}
+
+void ProjectState::write_buses_to_document_locked() {
+    json arr = json::array();
+    for (const auto& b : buses_) {
+        const char* kind = b.output_kind == BusOutputKind::Bus    ? "bus"
+                         : b.output_kind == BusOutputKind::Output ? "output"
+                                                                  : "master";
+        arr.push_back(json{
+            {"id",     b.id},
+            {"name",   b.display_name},
+            {"color",  b.color},
+            {"order",  b.order},
+            {"width",  b.width},
+            {"gainDb", b.gain_db},
+            {"mute",   b.muted},
+            {"output", json{{"type", kind}, {"target", b.output_target}}},
+        });
+    }
+    document_["buses"] = std::move(arr);
+}
+
+void ProjectState::materialise_buses() {
+    std::vector<BusDef>                                    defs;
+    std::unordered_map<std::string, audio::MixerChannelId> previous;
+    {
+        std::lock_guard lock{mutex_};
+        defs     = buses_;
+        previous = std::move(bus_mixers_);
+        bus_mixers_.clear();
+    }
+
+    // Strips from the outgoing project are ours to clean up; nothing else
+    // tracks them, exactly as with device_routings_.
+    for (auto& [_, mixer] : previous) engine_.remove_mixer_channel(mixer);
+
+    std::unordered_map<std::string, audio::MixerChannelId> created;
+    for (const auto& b : defs) {
+        // Main has no strip of its own yet: it is the engine's auto-created
+        // "Main" mixer, and play_item() deliberately routes unassigned items
+        // through the legacy default-device path so existing projects behave
+        // identically. Creating one here would just add an idle duplicate.
+        // Revisit when Main gains a real output of its own.
+        if (b.id == kMainBusId) continue;
+
+        const auto mixer = engine_.create_mixer_channel(b.display_name);
+        if (mixer.empty()) {
+            Logger::error("materialise_buses: no strip available for bus '{}'", b.display_name);
+            continue;
+        }
+        if (auto* m = engine_.find_mixer_channel(mixer)) {
+            m->set_gain_db(b.gain_db);
+            m->set_mute(b.muted);
+        }
+        // Only Master-kind output is wired in this slice. Bus→bus needs the
+        // topological ordering that does not exist yet, and named outputs need
+        // the logical-output map; both are separate stages.
+        if (b.output_kind == BusOutputKind::Master) {
+            if (b.width >= 2) {
+                engine_.route_mixer_to_master(mixer, 0, 0.0f, 0);   // L
+                engine_.route_mixer_to_master(mixer, 1, 0.0f, 1);   // R
+            } else {
+                // Mono bus centred into the stereo master, at the pan law so a
+                // centred mono source and a stereo fold-down agree.
+                engine_.route_mixer_to_master(mixer, 0, audio::kDefaultDownmixDb, 0);
+                engine_.route_mixer_to_master(mixer, 1, audio::kDefaultDownmixDb, 0);
+            }
+        }
+        created[b.id] = mixer;
+    }
+
+    {
+        std::lock_guard lock{mutex_};
+        bus_mixers_ = std::move(created);
+    }
+    Logger::info("materialise_buses: {} bus(es) live", defs.size());
+}
+
+std::string ProjectState::resolve_item_bus(const std::string& item_uuid) const {
+    if (item_uuid.empty()) return kMainBusId;
+
+    // Walk the tree carrying the nearest ancestor's assignment down. An item's
+    // own busId overrides whatever it inherited, so "item beats group" falls
+    // out of the ordering rather than needing a second pass.
+    std::string found;
+    bool        hit = false;
+    std::function<bool(const json&, const std::string&)> walk =
+        [&](const json& arr, const std::string& inherited) -> bool {
+            if (!arr.is_array()) return false;
+            for (const auto& it : arr) {
+                if (!it.is_object()) continue;
+                std::string effective = inherited;
+                if (it.contains("busId") && it["busId"].is_string()) {
+                    auto v = it["busId"].get<std::string>();
+                    if (!v.empty()) effective = std::move(v);
+                }
+                if (it.value("uuid", std::string{}) == item_uuid) {
+                    found = effective;
+                    hit   = true;
+                    return true;
+                }
+                if (it.value("type", std::string{}) == "group" &&
+                    it.contains("children") && it["children"].is_array()) {
+                    if (walk(it["children"], effective)) return true;
+                }
+            }
+            return false;
+        };
+
+    if (document_.contains("items")) walk(document_["items"], std::string{});
+    if (!hit && document_.contains("cartOnlyItems") && document_["cartOnlyItems"].is_array()) {
+        for (const auto& it : document_["cartOnlyItems"]) {
+            if (!it.is_object()) continue;
+            if (it.value("uuid", std::string{}) != item_uuid) continue;
+            if (it.contains("busId") && it["busId"].is_string())
+                found = it["busId"].get<std::string>();
+            break;
+        }
+    }
+
+    if (found.empty()) return kMainBusId;
+    // An assignment naming a bus that no longer exists falls back to Main
+    // rather than leaving the cue unrouted and silent.
+    for (const auto& b : buses_) {
+        if (b.id == found) return found;
+    }
+    Logger::warn("resolve_item_bus: item '{}' names unknown bus '{}'; using Main",
+                 item_uuid, found);
+    return kMainBusId;
+}
+
+std::vector<ProjectState::BusInfo> ProjectState::list_buses() const {
+    std::lock_guard lock{mutex_};
+    std::vector<BusInfo> out;
+    out.reserve(buses_.size());
+    for (const auto& b : buses_) {
+        BusInfo info;
+        info.def   = b;
+        info.mixer = mixer_for_bus(b.id);
+        out.push_back(std::move(info));
+    }
+
+    // Attribute every audio item to the bus it actually resolves to, so the
+    // caller sees inherited and overridden assignments rather than only the
+    // ones written on the item itself.
+    const auto attribute = [&](const json& it) {
+        if (!it.is_object()) return;
+        if (it.value("type", std::string{}) != "audio") return;
+        const auto uuid = it.value("uuid", std::string{});
+        if (uuid.empty()) return;
+        const auto bus_id = resolve_item_bus(uuid);
+        for (auto& info : out) {
+            if (info.def.id == bus_id) { info.item_uuids.push_back(uuid); return; }
+        }
+    };
+    std::function<void(const json&)> walk = [&](const json& arr) {
+        if (!arr.is_array()) return;
+        for (const auto& it : arr) {
+            attribute(it);
+            if (it.is_object() && it.value("type", std::string{}) == "group" &&
+                it.contains("children")) {
+                walk(it["children"]);
+            }
+        }
+    };
+    if (document_.contains("items")) walk(document_["items"]);
+    if (document_.contains("cartOnlyItems")) walk(document_["cartOnlyItems"]);
+    return out;
+}
+
+audio::MixerChannelId ProjectState::mixer_for_bus(const std::string& bus_id) const {
+    auto it = bus_mixers_.find(bus_id);
+    return it == bus_mixers_.end() ? audio::MixerChannelId{} : it->second;
+}
+
 bool ProjectState::start_preview(const std::string& item_uuid) {
     if (item_uuid.empty()) return false;
 
@@ -3837,6 +4082,11 @@ bool ProjectState::load_from_json(const json& doc_in) {
             release_device_routings_locked();
 
             document_ = std::move(doc_repaired);
+            // Read the incoming document's buses (synthesising Main/Monitor if
+            // it predates them) and write them back so the shape is canonical
+            // from here on. Strips are created after the lock is released.
+            load_buses_locked();
+            write_buses_to_document_locked();
             // Ensure required top-level keys exist (migrate older client saves).
             if (!document_.contains("settings") || !document_["settings"].is_object()) {
                 document_["settings"] = json{
@@ -3856,6 +4106,10 @@ bool ProjectState::load_from_json(const json& doc_in) {
             update_media_root_from_folder_locked();
             pending_repair_info_ = std::move(repair);
         }
+
+        // Create the engine strips for this project's buses. Outside the lock:
+        // every engine call takes its own.
+        materialise_buses();
 
         // Audio mirroring happens off-thread so the client can render the
         // project immediately. Items not yet loaded into the engine will
