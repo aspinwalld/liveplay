@@ -793,7 +793,7 @@ int main(int argc, char** argv) {
     server_cfg.port         = static_cast<std::uint16_t>(opts.port);
     if (opts.meter_broadcast_hz) server_cfg.meter_broadcast_hz = *opts.meter_broadcast_hz;
     if (opts.max_upload_bytes)   server_cfg.max_upload_bytes   = *opts.max_upload_bytes;
-    auto server = std::make_unique<net::ControlServer>(*engine, *project, server_cfg);
+    auto server = std::make_unique<net::ControlServer>(*engine, *project, *outputs, server_cfg);
     if (!server->start()) {
         Logger::error("Control server failed to start.");
         engine->stop();

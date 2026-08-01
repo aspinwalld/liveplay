@@ -434,6 +434,15 @@ public:
     };
     std::vector<BusInfo> list_buses() const;
 
+    // ---- Bus mutation ----------------------------------------------------
+    // All three write document_["buses"] so the change survives a save, and
+    // touch only the affected strip so other buses keep playing.
+    std::optional<BusDef> create_bus(const json& spec);
+    bool patch_bus(const std::string& id, const json& patch);
+    // Refuses the system buses. Items assigned to the deleted bus fall back to
+    // Main by having their busId cleared.
+    bool delete_bus(const std::string& id);
+
     std::filesystem::path media_root() const;
     void set_media_root(std::filesystem::path p);
 
@@ -531,8 +540,23 @@ private:
     // Definitions as loaded from the document, in display order, and the
     // engine mixer strip each one was materialised onto. Both guarded by
     // mutex_ and rebuilt whenever the document is loaded or replaced.
-    std::vector<BusDef>                                    buses_;
-    std::unordered_map<std::string, audio::MixerChannelId> bus_mixers_;
+    std::vector<BusDef> buses_;
+
+    // What a bus was materialised onto. A bus keeps its master pair for its
+    // lifetime, so changing where it outputs re-points those masters rather
+    // than reserving a fresh pair each time.
+    struct BusRouting {
+        audio::MixerChannelId     mixer;
+        audio::MasterChannelIndex master_l    = 0;
+        audio::MasterChannelIndex master_r    = 0;
+        bool                      has_masters = false;
+    };
+    std::unordered_map<std::string, BusRouting> bus_routings_;
+
+    // Master pairs handed back by deleted or rewired buses. Reused before the
+    // monotonic counter grows — without this, repeatedly changing a bus's
+    // output would walk the counter into the preview reserve and exhaust it.
+    std::vector<audio::MasterChannelIndex> free_master_pairs_;
 
     // Read document_["buses"] into buses_, synthesising the system buses and
     // migrating legacy per-item deviceOverride values into real buses. Caller
@@ -552,9 +576,14 @@ private:
     // False when the bus is exhausted. Caller holds mutex_.
     bool allocate_master_pair_locked(audio::MasterChannelIndex& l,
                                      audio::MasterChannelIndex& r);
-    // Wire one Output-kind bus to the hardware its logical name resolves to.
-    // Caller must NOT hold mutex_.
-    void wire_bus_to_output(const BusDef& bus, const audio::MixerChannelId& mixer);
+    // Return a pair to the pool for reuse. Caller holds mutex_.
+    void release_master_pair_locked(audio::MasterChannelIndex l);
+    // Connect a materialised strip to wherever its bus says it goes, reserving
+    // a master pair if the destination needs one. Caller must NOT hold mutex_.
+    void wire_bus(const BusDef& bus, BusRouting& routing);
+    // Drop every master route and assignment the bus holds and return its
+    // pair to the pool. Caller must NOT hold mutex_.
+    void unwire_bus(BusRouting& routing);
     // Next free master channel pair when allocating new device routings.
     // Default device occupies 0/1; preview occupies the top pair of the bus
     // (see audio::preview_master_base); overrides start here and step by 2.

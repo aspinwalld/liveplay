@@ -1007,8 +1007,15 @@ void ProjectState::reset() {
     master_assignments_.clear();
     item_uuid_to_cue_.clear();
     release_device_routings_locked();
-    for (auto& [_, mixer] : bus_mixers_) engine_.remove_mixer_channel(mixer);
-    bus_mixers_.clear();
+    for (auto& [_, r] : bus_routings_) {
+        if (!r.mixer.empty()) engine_.remove_mixer_channel(r.mixer);
+        if (r.has_masters) {
+            engine_.clear_master_assignment(r.master_l);
+            engine_.clear_master_assignment(r.master_r);
+        }
+    }
+    bus_routings_.clear();
+    free_master_pairs_.clear();
     buses_.clear();
     // The selection and the trigger-order stamps belong to the project that is
     // going away; carrying them into the next one would leave control surfaces
@@ -3550,6 +3557,14 @@ void ProjectState::write_buses_to_document_locked() {
 
 bool ProjectState::allocate_master_pair_locked(audio::MasterChannelIndex& l,
                                                audio::MasterChannelIndex& r) {
+    // Reuse a pair handed back by a deleted or rewired bus before growing the
+    // monotonic counter, so churn doesn't march into the preview reserve.
+    if (!free_master_pairs_.empty()) {
+        l = free_master_pairs_.back();
+        r = l + 1;
+        free_master_pairs_.pop_back();
+        return true;
+    }
     const audio::MasterChannelIndex bus_width     = engine_.config().master_channels;
     const audio::MasterChannelIndex reserved_base = audio::preview_master_base(bus_width);
     if (next_override_master_ + 1 >= reserved_base) return false;
@@ -3559,11 +3574,53 @@ bool ProjectState::allocate_master_pair_locked(audio::MasterChannelIndex& l,
     return true;
 }
 
-void ProjectState::wire_bus_to_output(const BusDef& bus,
-                                      const audio::MixerChannelId& mixer) {
+void ProjectState::release_master_pair_locked(audio::MasterChannelIndex l) {
+    free_master_pairs_.push_back(l);
+}
+
+void ProjectState::unwire_bus(BusRouting& routing) {
+    if (routing.mixer.empty()) return;
+    if (routing.has_masters) {
+        engine_.unroute_mixer_from_master(routing.mixer, routing.master_l);
+        engine_.unroute_mixer_from_master(routing.mixer, routing.master_r);
+        engine_.clear_master_assignment(routing.master_l);
+        engine_.clear_master_assignment(routing.master_r);
+        std::lock_guard lock{mutex_};
+        release_master_pair_locked(routing.master_l);
+        routing.has_masters = false;
+    } else {
+        // Master-kind buses sit on the shared 0/1 pair, which is not ours to
+        // release — only our own sends come off it.
+        engine_.unroute_mixer_from_master(routing.mixer, 0);
+        engine_.unroute_mixer_from_master(routing.mixer, 1);
+    }
+}
+
+void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
+    if (routing.mixer.empty()) return;
+
+    if (bus.output_kind == BusOutputKind::Master) {
+        if (bus.width >= 2) {
+            engine_.route_mixer_to_master(routing.mixer, 0, 0.0f, 0);   // L
+            engine_.route_mixer_to_master(routing.mixer, 1, 0.0f, 1);   // R
+        } else {
+            // Mono bus centred into the stereo master at the pan law, so a
+            // centred mono source and a stereo fold-down agree.
+            engine_.route_mixer_to_master(routing.mixer, 0, audio::kDefaultDownmixDb, 0);
+            engine_.route_mixer_to_master(routing.mixer, 1, audio::kDefaultDownmixDb, 0);
+        }
+        return;
+    }
+
+    if (bus.output_kind == BusOutputKind::Bus) {
+        Logger::warn("bus '{}' feeds another bus; bus→bus routing is not "
+                     "implemented yet, so it is silent", bus.display_name);
+        return;
+    }
+
     // What "FOH" means on this machine. Unmapped names fall back to being
-    // treated as a device name, which is what keeps a fresh install and
-    // migrated device overrides working with no configuration.
+    // treated as a device name, which keeps a fresh install working with no
+    // configuration and lets legacy device overrides migrate unchanged.
     const auto channels = outputs_.resolve(bus.output_target);
     if (channels.empty()) {
         Logger::warn("bus '{}': output '{}' resolves to nothing; leaving it silent",
@@ -3571,22 +3628,19 @@ void ProjectState::wire_bus_to_output(const BusDef& bus,
         return;
     }
 
-    audio::MasterChannelIndex master_l = 0;
-    audio::MasterChannelIndex master_r = 0;
-    bool have_pair = false;
-    {
+    if (!routing.has_masters) {
         std::lock_guard lock{mutex_};
-        have_pair = allocate_master_pair_locked(master_l, master_r);
-    }
-    if (!have_pair) {
-        Logger::error("bus '{}': out of master channels; leaving it silent",
-                      bus.display_name);
-        return;
+        if (!allocate_master_pair_locked(routing.master_l, routing.master_r)) {
+            Logger::error("bus '{}': out of master channels; leaving it silent",
+                          bus.display_name);
+            return;
+        }
+        routing.has_masters = true;
     }
 
     // One master channel per physical output channel, up to the stereo cap.
     const std::size_t used = std::min<std::size_t>(channels.size(), 2);
-    const audio::MasterChannelIndex masters[2] = {master_l, master_r};
+    const audio::MasterChannelIndex masters[2] = {routing.master_l, routing.master_r};
     for (std::size_t i = 0; i < used; ++i) {
         const auto dev = engine_.open_device_by_name(channels[i].device, 2);
         if (dev.empty()) {
@@ -3598,40 +3652,54 @@ void ProjectState::wire_bus_to_output(const BusDef& bus,
     }
 
     if (bus.width >= 2 && used >= 2) {
-        engine_.route_mixer_to_master(mixer, master_l, 0.0f, 0);   // L
-        engine_.route_mixer_to_master(mixer, master_r, 0.0f, 1);   // R
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l, 0.0f, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_r, 0.0f, 1);
     } else if (bus.width >= 2) {
         // Stereo bus folded into a mono output: both lanes at the pan law.
-        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 0);
-        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 1);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
+                                      audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
+                                      audio::kDefaultDownmixDb, 1);
     } else if (used >= 2) {
         // Mono bus centred across a stereo output.
-        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 0);
-        engine_.route_mixer_to_master(mixer, master_r, audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
+                                      audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_r,
+                                      audio::kDefaultDownmixDb, 0);
     } else {
-        engine_.route_mixer_to_master(mixer, master_l, 0.0f, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l, 0.0f, 0);
     }
 
     Logger::info("bus '{}' → output '{}' (masters {}/{}{})",
-                 bus.display_name, bus.output_target, master_l, master_r,
+                 bus.display_name, bus.output_target,
+                 routing.master_l, routing.master_r,
                  outputs_.has(bus.output_target) ? "" : ", unmapped: name used as device");
 }
 
 void ProjectState::materialise_buses() {
-    std::vector<BusDef>                                    defs;
-    std::unordered_map<std::string, audio::MixerChannelId> previous;
+    std::vector<BusDef>                         defs;
+    std::unordered_map<std::string, BusRouting> previous;
     {
         std::lock_guard lock{mutex_};
         defs     = buses_;
-        previous = std::move(bus_mixers_);
-        bus_mixers_.clear();
+        previous = std::move(bus_routings_);
+        bus_routings_.clear();
+        // A fresh project starts from a clean pool: every pair the outgoing
+        // one held is about to be torn down wholesale.
+        free_master_pairs_.clear();
     }
 
     // Strips from the outgoing project are ours to clean up; nothing else
     // tracks them, exactly as with device_routings_.
-    for (auto& [_, mixer] : previous) engine_.remove_mixer_channel(mixer);
+    for (auto& [_, r] : previous) {
+        if (!r.mixer.empty()) engine_.remove_mixer_channel(r.mixer);
+        if (r.has_masters) {
+            engine_.clear_master_assignment(r.master_l);
+            engine_.clear_master_assignment(r.master_r);
+        }
+    }
 
-    std::unordered_map<std::string, audio::MixerChannelId> created;
+    std::unordered_map<std::string, BusRouting> created;
     for (const auto& b : defs) {
         // Main has no strip of its own yet: it is the engine's auto-created
         // "Main" mixer, and play_item() deliberately routes unassigned items
@@ -3640,42 +3708,202 @@ void ProjectState::materialise_buses() {
         // Revisit when Main gains a real output of its own.
         if (b.id == kMainBusId) continue;
 
-        const auto mixer = engine_.create_mixer_channel(b.display_name);
-        if (mixer.empty()) {
+        BusRouting r;
+        r.mixer = engine_.create_mixer_channel(b.display_name);
+        if (r.mixer.empty()) {
             Logger::error("materialise_buses: no strip available for bus '{}'", b.display_name);
             continue;
         }
-        if (auto* m = engine_.find_mixer_channel(mixer)) {
+        if (auto* m = engine_.find_mixer_channel(r.mixer)) {
             m->set_gain_db(b.gain_db);
             m->set_mute(b.muted);
         }
-        // Bus→bus is the one kind still unwired: it needs the topological
-        // ordering that does not exist yet. Such a bus stays silent rather
-        // than being quietly rerouted somewhere it was not asked to go.
-        if (b.output_kind == BusOutputKind::Master) {
-            if (b.width >= 2) {
-                engine_.route_mixer_to_master(mixer, 0, 0.0f, 0);   // L
-                engine_.route_mixer_to_master(mixer, 1, 0.0f, 1);   // R
-            } else {
-                // Mono bus centred into the stereo master, at the pan law so a
-                // centred mono source and a stereo fold-down agree.
-                engine_.route_mixer_to_master(mixer, 0, audio::kDefaultDownmixDb, 0);
-                engine_.route_mixer_to_master(mixer, 1, audio::kDefaultDownmixDb, 0);
-            }
-        } else if (b.output_kind == BusOutputKind::Output) {
-            wire_bus_to_output(b, mixer);
-        } else {
-            Logger::warn("bus '{}' feeds another bus; bus→bus routing is not "
-                         "implemented yet, so it is silent", b.display_name);
-        }
-        created[b.id] = mixer;
+        wire_bus(b, r);
+        created[b.id] = r;
     }
 
     {
         std::lock_guard lock{mutex_};
-        bus_mixers_ = std::move(created);
+        bus_routings_ = std::move(created);
     }
     Logger::info("materialise_buses: {} bus(es) live", defs.size());
+}
+
+// ---------------------------------------------------------------------------
+// Bus mutation. Each of these updates document_["buses"] so the change is
+// saved, and touches only the affected strip so unrelated buses keep playing.
+// ---------------------------------------------------------------------------
+namespace {
+// Human-readable, stable-ish bus id derived from the name, so the document
+// stays legible. Uniqueness is the caller's problem.
+std::string bus_id_from_name(const std::string& name) {
+    std::string id;
+    for (char c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c))) id += static_cast<char>(std::tolower(c));
+        else if (!id.empty() && id.back() != '-')        id += '-';
+    }
+    while (!id.empty() && id.back() == '-') id.pop_back();
+    return id.empty() ? std::string{"bus"} : id;
+}
+}  // namespace
+
+std::optional<BusDef> ProjectState::create_bus(const json& spec) {
+    BusDef d;
+    d.display_name = spec.value("name", std::string{"Bus"});
+    d.color        = spec.value("color", std::string{});
+    d.width        = std::clamp(spec.value("width", 2), 1, 2);
+    d.gain_db      = spec.value("gainDb", 0.0f);
+    d.muted        = spec.value("mute", false);
+    if (spec.contains("output") && spec["output"].is_object()) {
+        const auto& out  = spec["output"];
+        const auto  kind = out.value("type", std::string{"master"});
+        d.output_kind = kind == "bus"    ? BusOutputKind::Bus
+                      : kind == "output" ? BusOutputKind::Output
+                                         : BusOutputKind::Master;
+        d.output_target = out.value("target", std::string{});
+    }
+
+    {
+        std::lock_guard lock{mutex_};
+        const std::string base = bus_id_from_name(d.display_name);
+        std::string       id   = base;
+        for (int n = 2; ; ++n) {
+            bool taken = false;
+            for (const auto& b : buses_) if (b.id == id) { taken = true; break; }
+            if (!taken) break;
+            id = base + "-" + std::to_string(n);
+        }
+        d.id = id;
+        // New buses land above Monitor, which deliberately sorts last.
+        int max_order = 0;
+        for (const auto& b : buses_) if (!b.system) max_order = std::max(max_order, b.order);
+        d.order = spec.value("order", max_order + 1);
+        buses_.push_back(d);
+        std::stable_sort(buses_.begin(), buses_.end(),
+                         [](const BusDef& a, const BusDef& b) { return a.order < b.order; });
+        write_buses_to_document_locked();
+    }
+
+    BusRouting r;
+    r.mixer = engine_.create_mixer_channel(d.display_name);
+    if (r.mixer.empty()) {
+        Logger::error("create_bus: no strip available for '{}'", d.display_name);
+        std::lock_guard lock{mutex_};
+        buses_.erase(std::remove_if(buses_.begin(), buses_.end(),
+                                    [&](const BusDef& b) { return b.id == d.id; }),
+                     buses_.end());
+        write_buses_to_document_locked();
+        return std::nullopt;
+    }
+    if (auto* m = engine_.find_mixer_channel(r.mixer)) {
+        m->set_gain_db(d.gain_db);
+        m->set_mute(d.muted);
+    }
+    wire_bus(d, r);
+    {
+        std::lock_guard lock{mutex_};
+        bus_routings_[d.id] = r;
+    }
+    Logger::info("create_bus: '{}' ({})", d.display_name, d.id);
+    return d;
+}
+
+bool ProjectState::patch_bus(const std::string& id, const json& patch) {
+    BusDef     updated;
+    BusRouting routing;
+    bool       found       = false;
+    bool       needs_rewire = false;
+    {
+        std::lock_guard lock{mutex_};
+        for (auto& b : buses_) {
+            if (b.id != id) continue;
+            found = true;
+            if (patch.contains("name"))   b.display_name = patch.value("name", b.display_name);
+            if (patch.contains("color"))  b.color        = patch.value("color", b.color);
+            if (patch.contains("order"))  b.order        = patch.value("order", b.order);
+            if (patch.contains("gainDb")) b.gain_db      = patch.value("gainDb", b.gain_db);
+            if (patch.contains("mute"))   b.muted        = patch.value("mute", b.muted);
+            if (patch.contains("width")) {
+                const int w = std::clamp(patch.value("width", b.width), 1, 2);
+                if (w != b.width) { b.width = w; needs_rewire = true; }
+            }
+            if (patch.contains("output") && patch["output"].is_object()) {
+                const auto& out  = patch["output"];
+                const auto  kind = out.value("type", std::string{"master"});
+                const auto  k    = kind == "bus"    ? BusOutputKind::Bus
+                                 : kind == "output" ? BusOutputKind::Output
+                                                    : BusOutputKind::Master;
+                const auto  t    = out.value("target", std::string{});
+                if (k != b.output_kind || t != b.output_target) {
+                    b.output_kind   = k;
+                    b.output_target = t;
+                    needs_rewire    = true;
+                }
+            }
+            updated = b;
+            break;
+        }
+        if (!found) return false;
+        std::stable_sort(buses_.begin(), buses_.end(),
+                         [](const BusDef& a, const BusDef& b) { return a.order < b.order; });
+        write_buses_to_document_locked();
+        auto it = bus_routings_.find(id);
+        if (it != bus_routings_.end()) routing = it->second;
+    }
+
+    // Level and mute apply straight to the live strip — no rewire, no gap.
+    if (!routing.mixer.empty()) {
+        if (auto* m = engine_.find_mixer_channel(routing.mixer)) {
+            m->set_gain_db(updated.gain_db);
+            m->set_mute(updated.muted);
+            if (patch.contains("name")) m->set_display_name(updated.display_name);
+        }
+        if (needs_rewire) {
+            unwire_bus(routing);
+            wire_bus(updated, routing);
+            std::lock_guard lock{mutex_};
+            bus_routings_[id] = routing;
+        }
+    }
+    return true;
+}
+
+bool ProjectState::delete_bus(const std::string& id) {
+    BusRouting routing;
+    {
+        std::lock_guard lock{mutex_};
+        auto it = std::find_if(buses_.begin(), buses_.end(),
+                               [&](const BusDef& b) { return b.id == id; });
+        if (it == buses_.end()) return false;
+        if (it->system) {
+            Logger::warn("delete_bus: '{}' is a system bus and cannot be deleted", id);
+            return false;
+        }
+        buses_.erase(it);
+
+        // Items pointing at the bus that just went away fall back to Main by
+        // losing their assignment, rather than being left dangling.
+        for_each_item(document_, [&](json& item, const std::string&) {
+            if (item.contains("busId") && item["busId"].is_string() &&
+                item["busId"].get<std::string>() == id) {
+                item.erase("busId");
+            }
+        });
+        write_buses_to_document_locked();
+
+        auto rit = bus_routings_.find(id);
+        if (rit != bus_routings_.end()) {
+            routing = rit->second;
+            bus_routings_.erase(rit);
+        }
+    }
+
+    if (!routing.mixer.empty()) {
+        unwire_bus(routing);                       // returns the pair to the pool
+        engine_.remove_mixer_channel(routing.mixer);
+    }
+    Logger::info("delete_bus: '{}'", id);
+    return true;
 }
 
 std::string ProjectState::resolve_item_bus(const std::string& item_uuid) const {
@@ -3771,8 +3999,8 @@ std::vector<ProjectState::BusInfo> ProjectState::list_buses() const {
 }
 
 audio::MixerChannelId ProjectState::mixer_for_bus(const std::string& bus_id) const {
-    auto it = bus_mixers_.find(bus_id);
-    return it == bus_mixers_.end() ? audio::MixerChannelId{} : it->second;
+    auto it = bus_routings_.find(bus_id);
+    return it == bus_routings_.end() ? audio::MixerChannelId{} : it->second.mixer;
 }
 
 bool ProjectState::start_preview(const std::string& item_uuid) {

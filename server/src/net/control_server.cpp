@@ -341,8 +341,9 @@ json cue_to_json(const core::CueMeta& c, audio::AudioEngine& engine) {
 
 ControlServer::ControlServer(audio::AudioEngine& engine,
                              core::ProjectState& state,
+                             core::OutputMap&    outputs,
                              ControlServerConfig cfg)
-    : engine_(engine), state_(state), cfg_(std::move(cfg)),
+    : engine_(engine), state_(state), outputs_(outputs), cfg_(std::move(cfg)),
       impl_(std::make_unique<Impl>()) {}
 
 ControlServer::~ControlServer() { stop(); }
@@ -1584,6 +1585,64 @@ void ControlServer::install_routes() {
                 }
                 return json_ok(arr);
             } catch (const std::exception& e) { return json_err(500, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/buses").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req){
+            try {
+                auto created = state_.create_bus(json::parse(req.body));
+                if (!created) return json_err(507, "no mixer strip available");
+                broadcast_doc_patch(json{
+                    {"type", "doc_patch"}, {"op", "buses_patched"},
+                    {"buses", state_.full_document().value("buses", json::array())},
+                });
+                return json_ok(json({{"id", created->id}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/buses/<string>").methods(crow::HTTPMethod::Patch)
+        ([this](const crow::request& req, std::string id){
+            try {
+                if (!state_.patch_bus(id, json::parse(req.body)))
+                    return json_err(404, "not found");
+                broadcast_doc_patch(json{
+                    {"type", "doc_patch"}, {"op", "buses_patched"},
+                    {"buses", state_.full_document().value("buses", json::array())},
+                });
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/buses/<string>").methods(crow::HTTPMethod::Delete)
+        ([this](std::string id){
+            try {
+                // Refused for the system buses; assigned items fall back to Main.
+                if (!state_.delete_bus(id)) return json_err(409, "not found or not deletable");
+                broadcast_doc_patch(json{
+                    {"type", "doc_patch"}, {"op", "buses_patched"},
+                    {"buses", state_.full_document().value("buses", json::array())},
+                });
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    // ---- Logical outputs ----
+    // Server-owned: what a project's output names mean on THIS machine. Never
+    // part of a project document — that is what keeps a show portable.
+    CROW_ROUTE(app, "/api/outputs").methods(crow::HTTPMethod::Get)
+        ([this] {
+            try { return json_ok(outputs_.to_json()); }
+            catch (const std::exception& e) { return json_err(500, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/outputs").methods(crow::HTTPMethod::Put)
+        ([this](const crow::request& req){
+            try {
+                if (!outputs_.from_json(json::parse(req.body)))
+                    return json_err(400, "malformed output map");
+                outputs_.save();
+                return json_ok(outputs_.to_json());
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 
     // ---- Mixer channels ----
