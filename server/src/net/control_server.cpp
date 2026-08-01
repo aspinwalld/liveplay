@@ -1688,7 +1688,14 @@ void ControlServer::install_routes() {
                 if (!outputs_.from_json(json::parse(req.body)))
                     return json_err(400, "malformed output map");
                 outputs_.save();
-                return json_ok(outputs_.to_json());
+                // Buses are wired from the map at load time, so without this a
+                // remapped output would appear to do nothing until the project
+                // was reloaded. Only the buses this edit actually moved are
+                // re-wired — the rest keep playing.
+                const auto moved = state_.rewire_buses_for_output_map();
+                auto out = outputs_.to_json();
+                out["rewiredBuses"] = moved;
+                return json_ok(out);
             } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 

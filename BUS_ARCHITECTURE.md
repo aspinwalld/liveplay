@@ -48,14 +48,10 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 | **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
 | **Pan moves the two mixer→master send gains in place; it never rewires.** `POST /api/buses/<id>/pan` is live-only, `PATCH` persists on settle. | `route_mixer_to_master` replaces an existing send, so a pan drag drops no audio. Going through `unwire_bus`/`wire_bus` would release and re-acquire the master pair and re-open the device on every drag event. |
 | **A stereo bus shows its pan knob disabled** rather than hiding it. | Strips must stay the same height or the meters stop lining up across the rail. Balance is still deferred (§2.5.3). |
+| **An output-map save re-wires only the buses the edit actually moved.** `BusRouting` records what the name resolved to when it was wired; `PUT /api/outputs` re-resolves each Output-kind bus and leaves it alone unless the channels differ. | Buses are wired from the map at load, so without this a remap did nothing until the project was reloaded. Rewiring *everything* would have been the easy fix, but it drops audio on buses the edit never touched — not acceptable mid-show. A bus that failed to wire earlier records no resolution, so it compares as changed and gets retried, which is what you want right after fixing the map. |
 
 ### 0.3 Not done
 
-- **An output-map edit does not re-wire live buses.** `PUT /api/outputs` saves and persists the
-  map, but `materialise_buses()` runs only on document load, so a bus already pointing at "FOH"
-  keeps the routing it was wired with. The operator has to reassign the bus or reload the project.
-  Confirmed by test, not yet fixed — the fix needs a decision about whether an edit may interrupt
-  audio on buses it does not affect.
 - **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
 - **Stage 4 — bus → bus.** A bus targeting another bus is accepted, warns, and stays silent.
 - **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics/Inserts tabs render disabled.

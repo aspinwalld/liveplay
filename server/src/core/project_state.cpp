@@ -3694,6 +3694,7 @@ void ProjectState::release_master_pair_locked(audio::MasterChannelIndex l) {
 
 void ProjectState::unwire_bus(BusRouting& routing) {
     if (routing.mixer.empty()) return;
+    routing.wired_channels.clear();
     if (routing.has_masters) {
         engine_.unroute_mixer_from_master(routing.mixer, routing.master_l);
         engine_.unroute_mixer_from_master(routing.mixer, routing.master_r);
@@ -3708,6 +3709,53 @@ void ProjectState::unwire_bus(BusRouting& routing) {
         engine_.unroute_mixer_from_master(routing.mixer, 0);
         engine_.unroute_mixer_from_master(routing.mixer, 1);
     }
+}
+
+std::size_t ProjectState::rewire_buses_for_output_map() {
+    std::vector<BusDef>                         defs;
+    std::unordered_map<std::string, BusRouting> routings;
+    {
+        std::lock_guard lock{mutex_};
+        defs     = buses_;
+        routings = bus_routings_;
+    }
+
+    const auto same = [](const std::vector<OutputMap::Channel>& a,
+                         const std::vector<OutputMap::Channel>& b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (a[i].device != b[i].device || a[i].hw_channel != b[i].hw_channel) return false;
+        }
+        return true;
+    };
+
+    std::size_t moved = 0;
+    for (const auto& bus : defs) {
+        // Master- and Bus-kind buses never consult the map, and resolving
+        // their empty target would hit the identity fallback and look like a
+        // change on every save.
+        if (bus.output_kind != BusOutputKind::Output) continue;
+
+        auto it = routings.find(bus.id);
+        if (it == routings.end() || it->second.mixer.empty()) continue;
+
+        // A bus that failed to wire earlier has no recorded resolution, so it
+        // compares as changed and gets a retry — which is what you want after
+        // the operator has just fixed the map.
+        if (same(outputs_.resolve(bus.output_target), it->second.wired_channels)) continue;
+
+        BusRouting routing = it->second;
+        unwire_bus(routing);
+        wire_bus(bus, routing);
+        {
+            std::lock_guard lock{mutex_};
+            bus_routings_[bus.id] = routing;
+        }
+        ++moved;
+        Logger::info("output map changed: re-wired bus '{}' -> '{}'",
+                     bus.display_name, bus.output_target);
+    }
+    return moved;
 }
 
 bool ProjectState::set_bus_pan_live(const std::string& id, float pan) {
@@ -3752,6 +3800,10 @@ void ProjectState::apply_bus_pan(const BusDef& bus, const BusRouting& routing) {
 void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
     if (routing.mixer.empty()) return;
 
+    // Only the Output branch below consults the map; anything else is wired
+    // from nothing the map can change, so it records no resolution.
+    routing.wired_channels.clear();
+
     if (bus.output_kind == BusOutputKind::Master) {
         if (bus.width >= 2) {
             engine_.route_mixer_to_master(routing.mixer, 0, 0.0f, 0);   // L
@@ -3780,6 +3832,7 @@ void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
                      bus.display_name, bus.output_target);
         return;
     }
+    routing.wired_channels = channels;
 
     if (!routing.has_masters) {
         std::lock_guard lock{mutex_};

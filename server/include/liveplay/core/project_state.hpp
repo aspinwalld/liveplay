@@ -454,6 +454,17 @@ public:
     // when the gesture settles.
     bool set_bus_pan_live(const std::string& id, float pan);
 
+    // Re-wire the buses an output-map edit actually moved, and only those.
+    // Call after OutputMap changes: a bus already pointing at "FOH" keeps the
+    // routing it was wired with otherwise, so remapping FOH would appear to do
+    // nothing until the project was reloaded.
+    //
+    // Deliberately narrow. Rewiring every bus would drop audio on buses the
+    // edit did not touch, which is not acceptable mid-show, so each bus is
+    // re-resolved and left alone unless its channels differ from what it was
+    // wired to. Returns the number of buses moved.
+    std::size_t rewire_buses_for_output_map();
+
     std::filesystem::path media_root() const;
     void set_media_root(std::filesystem::path p);
 
@@ -561,6 +572,11 @@ private:
         audio::MasterChannelIndex master_l    = 0;
         audio::MasterChannelIndex master_r    = 0;
         bool                      has_masters = false;
+        // What the bus's logical output name resolved to when it was wired.
+        // Kept so an output-map edit can rewire only the buses the edit
+        // actually moved, instead of interrupting every bus on the desk.
+        // Empty for Master-kind buses, which do not consult the map.
+        std::vector<OutputMap::Channel> wired_channels;
     };
     std::unordered_map<std::string, BusRouting> bus_routings_;
 
