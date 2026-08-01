@@ -174,12 +174,18 @@ const masterGainDb = computed(() => server.outputChannelGains[0] ?? 0);
 
 const buses = computed<Bus[]>(() => server.buses ?? []);
 
-// Only user buses get a strip. Main has no engine strip (unassigned cues take
-// the legacy default-device path) and Monitor is the PFL destination, which
-// nothing can be assigned to until PFL exists — drawing either as a fader that
-// does nothing would be a lie, and Monitor showing up as the lone strip on a
-// fresh project reads as "the mixer is already set up" when it isn't.
-const userBuses = computed(() => buses.value.filter(b => !b.system && b.mixerId));
+// Only user buses get a strip. Main is where unassigned cues already land and
+// Monitor is the PFL destination, which nothing can be assigned to until PFL
+// exists — drawing either as a fader that does nothing would be a lie, and
+// Monitor showing up as the lone strip on a fresh project reads as "the mixer
+// is already set up" when it isn't.
+//
+// Deliberately NOT filtered on mixerId. A bus is a bus whether or not the
+// engine currently has a strip for it; MixerStrip already renders the
+// strip-less state. Hiding them meant a single fetch that caught the server
+// mid-rebuild emptied the whole rail, and nothing refetched until the panel
+// was remounted — which is why expanding or undocking appeared to "fix" it.
+const userBuses = computed(() => buses.value.filter(b => !b.system));
 
 const masterGainLabel = computed(() =>
   masterGainDb.value <= -60 ? '-∞'

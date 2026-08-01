@@ -3884,9 +3884,15 @@ void ProjectState::materialise_buses() {
     std::unordered_map<std::string, BusRouting> previous;
     {
         std::lock_guard lock{mutex_};
-        defs     = buses_;
-        previous = std::move(bus_routings_);
-        bus_routings_.clear();
+        defs = buses_;
+        // Copy rather than move, and leave bus_routings_ in place. Everything
+        // below runs with mutex_ released — it makes engine calls and can open
+        // devices — so emptying the table here would publish a state where
+        // every bus exists but reports no strip. A GET /api/buses landing in
+        // that window returned exactly that, and the mixer, which hides buses
+        // without a strip, showed an empty rail until it was remounted. The
+        // table is swapped once, at the end, instead.
+        previous = bus_routings_;
         // A fresh project starts from a clean pool: every pair the outgoing
         // one held is about to be torn down wholesale.
         free_master_pairs_.clear();
@@ -3919,6 +3925,11 @@ void ProjectState::materialise_buses() {
     }
 
     {
+        // One swap: the table goes straight from the outgoing routings to the
+        // new ones and is never observed empty in between. Readers in the gap
+        // above see the old strip ids, which are stale for a moment rather
+        // than absent — a meter reads silent and self-corrects, where a
+        // missing id made the whole bus disappear.
         std::lock_guard lock{mutex_};
         bus_routings_ = std::move(created);
     }

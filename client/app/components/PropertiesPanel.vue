@@ -358,7 +358,9 @@ const onBusChange = async (e: Event) => {
   const it = selectedItem.value as any;
   if (!it) return;
   if (!v) delete it.busId; else it.busId = v;
-  handleSave();
+  // Awaited: the save can re-materialise the buses server-side, and refetching
+  // across that rebuild is what used to read back a half-built table.
+  await handleSave();
   // Membership is resolved server-side, so refresh the mixer's view of it.
   try { await _server.fetchBuses(); } catch { /* offline */ }
 };
