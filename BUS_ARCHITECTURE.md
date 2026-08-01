@@ -1,9 +1,64 @@
 # LivePlay — Bus Architecture
 
-> **Status:** Design proposal + staged implementation plan.
+> **Status:** Stages 0–2 implemented on `fix/engine-config-wiring`. Stages 3–5 not started.
 > Supersedes the "Stage 3 — Bus Mixing" sketch in `IMPROVEMENTS_PLAN.md` §6, which is now
-> partly stale (it lists mute/solo/mixer-meters as missing; they exist).
-> Ownership-model placement follows `OWNERSHIP_MODEL.md`.
+> stale (it lists mute/solo/mixer-meters as missing; they exist).
+> Ownership-model placement follows the object-ownership model discussed in issue #46.
+
+---
+
+## 0. Implementation status
+
+Everything below §1 is the original design. This section records what is actually built and the
+decisions taken during implementation that changed or sharpened it — read this first.
+
+### 0.1 Done
+
+**Stage 0 — prerequisites.** Device-override routings are released on project close and switch
+(they leaked strips and master pairs for the life of the process). `mixer_accumulators_` is sized
+once at `start()` for `max_mixer_channels` instead of growing on the render thread, with
+`create_mixer_channel()` refusing past the cap (`--max-buses`, default 64). Strip-level REST for
+gain and mute.
+
+**Stage 1 — model.** Buses live in `document_["buses"]`, materialise onto engine strips on load,
+and resolve by walking group ancestry: an item's own `busId` wins, else the nearest ancestor
+group's, else Main. Full CRUD over REST with `buses_patched` broadcast. Master pairs are kept for
+a bus's lifetime and returned to a free list on delete or rewire.
+
+**Stage 2 — mixer.** `MixerPanel` / `MixerStrip` / `MixerChannelDetails`, docking as a resizable
+side pane or taking the full workspace. Per-lane meters. The legacy `RoutingMatrixPanel` and the
+per-item device-override control are deleted.
+
+### 0.2 Decisions taken during implementation
+
+| Decision | Why |
+|---|---|
+| **Output routing left the project entirely.** Main is a real bus; `settings.defaultOutputDevice` migrates onto it as a logical output and is dropped from the document. | A project naming a sound card cannot travel between venues. What a bus feeds is the show's business; what that output *is* in hardware belongs to the machine. |
+| **`OutputMap` (`outputs.json` beside the exe), with identity fallback** — an unmapped name is treated as a device name. | A fresh install works with no configuration, and legacy device overrides migrate without moving any audio. |
+| **`deviceOverride` migrates to one bus per device**, then the field is dropped. | A project should carry one routing concept, not two. |
+| **A document PUT with no `buses` key means "unchanged"**, not "delete them all". | The client round-trips the whole document on every save and does not carry the bus list; taking absence literally wiped every bus on any unrelated edit. |
+| **System buses (Main, Monitor) are hidden from the strip rail.** | Main has no user-facing level of its own and Monitor is the PFL destination nothing can be assigned to yet. Showing them made an unconfigured mixer look configured. |
+| **Faders drive the engine live and persist on settle.** | Binding straight to `bus.gainDb` meant a PATCH plus a full refetch per drag event, and the knob fought the drag. |
+| **The mixer's master fader drives output-channel gain on masters 0/1**, the same parameter as the transport bar. | Two faders both labelled master moving independently. **Consequence: the engine's global master gain now has no UI.** |
+| **One dB scale shared by meter and fader.** Fader and scale span −60…+12; the meter is dBFS, tops out at 0, and its track covers only that part of the range. | 0 dBFS lands on the 0 tick, the meter keeps full resolution, and no dead strip sits above it. Only sound while both map dB to position linearly — see `client/app/utils/meterScale.ts`. |
+| **Per-lane meters replace the combined read in the broadcaster.** | Both reset max-since-read; calling them in sequence would leave the second reading silence. Combined values are derived from the lanes. |
+| **`LiveMeterBar` reads output-target zone levels** instead of hardcoded −40/−18/−9. | It disagreed with `StereoMeter` about where "hot" starts on every target except the default. |
+
+### 0.3 Not done
+
+- **Detachable mixer window.** Should be simpler than the cart pop-out it copies: the cart needs
+  IPC project sync because it needs the document, but the mixer only needs buses and meters, which
+  already arrive over the WebSocket — so it can open its own connection. §8.6
+- **`Knob.vue`** — still the one component that must be built from scratch; needed for pan and all
+  of Stage 5. §8.2
+- **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
+- **Stage 4 — bus → bus.** A bus targeting another bus is accepted, warns, and stays silent.
+- **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics/Inserts tabs render disabled.
+- **`previewDevice` / `ltcDevice` are still device names in the project** — same portability
+  problem `defaultOutputDevice` had, untouched because they are separate features.
+- **Global master gain has no UI** (see above). A true master fader distinct from output trim is a
+  real thing a desk has; needs a decision.
+- **Pan** is designed (§2.5.3) but not built — it needs `Knob.vue`.
 
 ---
 
