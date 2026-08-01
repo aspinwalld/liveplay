@@ -587,6 +587,15 @@
     "tabOverview": "Overview",
     "tabEq": "EQ",
     "tabDynamics": "Dynamics",
-    "tabInserts": "Inserts"
+    "tabInserts": "Inserts",
+    "notImplemented": "not implemented",
+    "emptySlot": "Empty",
+    "threshold": "Thresh",
+    "ratio": "Ratio",
+    "attack": "Attack",
+    "release": "Release",
+    "prevChannel": "Previous channel",
+    "nextChannel": "Next channel",
+    "backToMixer": "Back to the mixer"
   }
 }

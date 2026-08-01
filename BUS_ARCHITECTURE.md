@@ -47,6 +47,8 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 | **The master is a `MixerStrip` with `master` set**, not bespoke markup in `MixerPanel`. | It had its own padding, spacing and row set, so the one strip that matters most looked unlike every other. Every row now exists on both — blank where it does not apply — because the faders only line up across the rail if the rows above and below them match. |
 | **Bus width moved from the strip to the channel-details view.** | A button reading "M" sitting next to one reading "MUTE" is a trap, and width is a setup decision rather than a live one. The strip reports it next to the button that opens where it can be changed. |
 | **The meter/fader block is the only part of a strip that flexes.** | It had a `min-height`, so a short pane overflowed instead of the fader getting shorter. Everything else is fixed height and the fader absorbs the difference, down to a floor where the pane scrolls instead. |
+| **The channel view replaces the rail instead of docking under it, and drops its tabs** (§8.4). Its left column is the selected strip, reusing `MixerStrip`. | Sharing the height left the strips half-size in the one mode with room for them, and moved the fader you were holding. Tabs put a compressor behind a click during a show. Reusing the strip means the controls are the same objects at the same size, with no second implementation to drift. |
+| **Which channel is open is separate state from which strip is selected.** | With one value, any click on a strip threw the window out of the rail into the channel view. |
 | **The detached mixer window still takes the cart window's project-data IPC**, despite needing no document to function. | Meter zone colours come from `settings.outputTargetLevels`, and theme/accent from `theme` — without them the popped-out meters would colour off the EBU defaults and disagree with the same meter in the main window. Buses, meters and fader moves do go over that window's own WebSocket. |
 | **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
 | **Pan moves the two mixer→master send gains in place; it never rewires.** `POST /api/buses/<id>/pan` is live-only, `PATCH` persists on settle. | `route_mixer_to_master` replaces an existing send, so a pan drag drops no audio. Going through `unwire_bus`/`wire_bus` would release and re-acquire the master pair and re-open the device on every drag event. |
@@ -57,7 +59,8 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 
 - **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
 - **Stage 4 — bus → bus.** A bus targeting another bus is accepted, warns, and stays silent.
-- **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics/Inserts tabs render disabled.
+- **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics panels in the channel view are
+  laid-out shells with disabled controls.
 - **`previewDevice` / `ltcDevice` are still device names in the project** — same portability
   problem `defaultOutputDevice` had, untouched because they are separate features.
 - **Global master gain has no UI** (see above). A true master fader distinct from output trim is a
@@ -580,27 +583,39 @@ mixer is therefore a panel swap inside `MainWorkspace.vue`, following the patter
 / `cartClosed` already use ([MainWorkspace.vue:96-166](client/app/components/MainWorkspace.vue#L96-L166)),
 with a toggle in `ProjectHeader.vue`.
 
-### 8.4 Channel details
+### 8.4 Channel view
 
-Selecting a strip opens a full-width detail view for that bus. The conventional zoning for a
-channel-overview screen, and what each zone holds here:
+Opening a channel **replaces** the strip rail rather than sharing the window with it. The earlier
+draft had it as a drawer under the rail, which was wrong twice over: it left the strips at half
+height in the one mode that has room for them, and the fader you were adjusting ended up somewhere
+other than where you grabbed it.
 
-| Zone | Conventionally | LivePlay |
-|---|---|---|
-| Top | Section tabs | **Overview / EQ / Dynamics / Inserts / Output** |
-| Header | Channel selector + name | Bus selector with ‹ › prev/next, name, colour |
-| Left column | Meter, gain, input controls, filters, pan, mute/solo | Meter + fader, dB readout, width, pan, PFL/Mute |
-| Centre top | EQ curve + per-band controls | EQ curve + bands — **placeholder until Stage 5** |
-| Centre bottom | Dynamics curve, gate, compressor, sidechain | Same shape — **placeholder until Stage 5** |
-| Right | Sends and output assignment | **Output routing** + **the list of items/groups feeding this bus** |
-| Bottom | Mini-strip bank across all channels | Same: every bus as a mini strip, click to switch |
+The zoning follows what a large-format live console does on its channel screen, and each part of
+that shape carries a reason:
 
-Two of those deserve emphasis, because they are easy to drop and expensive to retrofit:
+| Zone | LivePlay |
+|---|---|
+| Header | Colour chip, name, width + output summary, delete, back to the rail |
+| Left column | **The selected channel's strip** — the same `MixerStrip`, same width, full height |
+| Main area | Every processing panel at once: Output routing, EQ, Dynamics, Inserts, and what feeds this bus |
+| Bottom | Channel select row across all buses, with ‹ › arrows |
 
-**The persistent mini-strip bank along the bottom.** It is how you move between channels without
-leaving the detail view, and it keeps the whole desk visible while working on one channel. Worth
-building in Stage 2 even though most of the page above it is placeholder, because it defines the
-navigation model.
+**The left column is the strip itself, not a redrawing of it.** Reusing `MixerStrip` means the
+fader, meter, pan and mute you were just using are literally the same controls at the same size —
+there is no second implementation to drift, and nothing moves under your hand when the view opens.
+
+**No tabs.** An operator reaching for a compressor mid-show should not have to find a tab first, so
+the panels are laid out together and flow into as many columns as the window allows. Tabs were in
+an earlier draft; they were the wrong trade for a live surface.
+
+**The select row along the bottom.** It is how you move between channels without leaving the view,
+and it keeps the whole desk reachable while working on one channel. The arrows step through the
+same order as the rail. Worth building in Stage 2 even though most of the page above it is shell,
+because it defines the navigation model.
+
+**Selection and "which channel is open" are separate.** When they were one value, any click on a
+strip threw the window out of the rail and into the channel view. Opening is now something you ask
+for — the strip's button, or the select row.
 
 **The right-hand column answers "what is connected to this."** On a desk that is sends and bus
 assignment. LivePlay's equivalent is the bus's own output *plus* the list of items and groups

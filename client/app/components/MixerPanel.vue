@@ -46,7 +46,24 @@
       </button>
     </header>
 
-    <div class="mixer__body">
+    <!-- The channel view replaces the rail rather than sharing the window with
+         it. Splitting the height between the two left the strips half-height
+         in the one mode that has room for them, and put the fader you were
+         adjusting somewhere different from where you grabbed it. Here the rail
+         is always full height, and opening a channel swaps to a view whose own
+         left column is that channel's strip — the same strip, same size. -->
+    <MixerChannelDetails
+      v-if="detailsBus"
+      :bus="detailsBus"
+      :buses="userBuses"
+      :output-names="outputNames"
+      @patch="onPatch"
+      @delete="onDelete"
+      @select="showChannel"
+      @close="detailsId = ''"
+    />
+
+    <div v-else class="mixer__body">
       <div class="mixer__strips">
         <MixerStrip
           v-for="bus in userBuses"
@@ -70,20 +87,6 @@
         <MixerStrip :bus="masterBus" :touch="touch" :output-names="[]" master />
       </div>
     </div>
-
-    <!-- Selected bus detail. Only in full mode: the three-column layout is
-         unusable squeezed into a docked side pane, so opening it switches the
-         mixer to full width rather than rendering something cramped. -->
-    <MixerChannelDetails
-      v-if="selectedBus && mode === 'full'"
-      :bus="selectedBus"
-      :buses="buses"
-      :output-names="outputNames"
-      @patch="onPatch"
-      @delete="onDelete"
-      @select="selectedId = $event"
-      @close="selectedId = ''"
-    />
   </div>
 </template>
 
@@ -111,12 +114,20 @@ function detach() {
   void (window as any).electronAPI?.openMixerWindow?.();
 }
 
-// Opening channel details from a docked pane switches to full width first —
-// the detail layout needs the room, and silently rendering it crushed was
-// worse than not showing it.
+// Opening the channel view from a docked pane switches to full width first —
+// it needs the whole window, and silently rendering it crushed was worse than
+// not showing it.
 function openDetails(id: string) {
   selectedId.value = id;
+  detailsId.value  = id;
   if (props.mode !== 'full') emit('mode', 'full');
+}
+
+// The select row and the arrows move the channel view without leaving it.
+function showChannel(id: string) {
+  if (!id) return;
+  selectedId.value = id;
+  detailsId.value  = id;
 }
 
 const server = useLiveplayServer();
@@ -129,6 +140,8 @@ const touch = computed(() => uiMode.value === 'playback');
 // old one and the selection would be lost exactly when opening details forces
 // that switch — which looked like needing to click twice.
 const selectedId  = useState<string>('liveplay:mixerSelectedBus', () => '');
+// Which channel the channel view is showing; empty means the rail.
+const detailsId   = useState<string>('liveplay:mixerDetailsBus', () => '');
 const outputNames = ref<string[]>([]);
 
 // The master strip drives the *same* parameter as the transport bar's Main
@@ -173,7 +186,17 @@ const buses = computed<Bus[]>(() => server.buses ?? []);
 // was remounted — which is why expanding or undocking appeared to "fix" it.
 const userBuses = computed(() => buses.value.filter(b => !b.system));
 
-const selectedBus = computed(() => buses.value.find(b => b.id === selectedId.value) ?? null);
+// The channel view takes the whole window, so it is only ever entered in full
+// mode — a docked side pane has nowhere to put the processing panels.
+//
+// Which channel it shows is deliberately separate from which strip is
+// highlighted. When they were the same value, any click on a strip yanked the
+// whole window out of the rail and into the channel view; you now have to ask
+// for it, via the strip's button or the select row at the bottom.
+const detailsBus = computed(() =>
+  props.mode === 'full'
+    ? userBuses.value.find(b => b.id === detailsId.value) ?? null
+    : null);
 
 onMounted(async () => {
   await server.fetchBuses();
@@ -189,10 +212,15 @@ async function onPatch(id: string, patch: Partial<Bus>) {
 async function onDelete(id: string) {
   await server.deleteBus(id);
   if (selectedId.value === id) selectedId.value = '';
+  // Deleting the channel you are looking at drops you back to the rail rather
+  // than leaving the view pointed at something that no longer exists.
+  if (detailsId.value === id) detailsId.value = '';
 }
 async function addBus() {
   const id = await server.createBus({ name: t('mixer.newBusName'), width: 2 });
   selectedId.value = id;
+  // Back to the rail, where the new strip actually is.
+  detailsId.value = '';
 }
 </script>
 
