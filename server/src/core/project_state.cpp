@@ -475,7 +475,8 @@ std::chrono::nanoseconds parse_smpte_timecode_to_ns(const std::string& tc,
 
 // ---------------------------------------------------------------------------
 
-ProjectState::ProjectState(audio::AudioEngine& engine) : engine_(engine) {
+ProjectState::ProjectState(audio::AudioEngine& engine, OutputMap& outputs)
+    : engine_(engine), outputs_(outputs) {
     document_ = default_empty_document();
     start_sequencer();
     // Background decoder for single-item adds/media swaps (#43).
@@ -1018,6 +1019,10 @@ void ProjectState::reset() {
     project_name_ = "Untitled";
     project_file_path_.clear();
     document_ = default_empty_document();
+    // A brand-new project still has Main and Monitor, so /api/buses and the
+    // mixer are never looking at an empty desk.
+    load_buses_locked();
+    write_buses_to_document_locked();
     apply_to_engine_locked();
 }
 
@@ -1809,7 +1814,14 @@ bool ProjectState::replace_full_document(const json& doc) {
         }
         project_name_ = document_.value("name", std::string{"Untitled"});
         update_media_root_from_folder_locked();
+        // The incoming document carries its own buses. Without this, buses_
+        // would still describe the outgoing document and every assignment in
+        // the new one would resolve against stale definitions.
+        load_buses_locked();
+        write_buses_to_document_locked();
     }
+    // Rebuild the engine strips for the new document's buses. Outside the lock.
+    materialise_buses();
     // Kick off the engine mirror asynchronously — matches load_from_json's
     // path so the PUT /api/project/document handler doesn't block on cue
     // decode for large projects. start_async_mirror() takes mutex_ itself,
@@ -3360,21 +3372,14 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
         // while the top two channels of the bus are reserved for preview.
         // Never allocate into or past that reserve — doing so would collide with
         // preview output or run past the engine's master bus width.
-        const audio::MasterChannelIndex bus_width =
-            engine_.config().master_channels;
-        const audio::MasterChannelIndex reserved_base =
-            audio::preview_master_base(bus_width);
-        if (next_override_master_ + 1 >= reserved_base) {
+        if (!allocate_master_pair_locked(master_l, master_r)) {
             Logger::error(
                 "ensure_device_routing: out of master channels for '{}' "
-                "(next={}, reserved_base={}, bus_width={}); item will use "
-                "default routing instead of a dedicated device master",
-                device_name, next_override_master_, reserved_base, bus_width);
+                "(next={}, bus_width={}); item will use default routing "
+                "instead of a dedicated device master",
+                device_name, next_override_master_,
+                engine_.config().master_channels);
             exhausted = true;
-        } else {
-            master_l = next_override_master_;
-            master_r = next_override_master_ + 1;
-            next_override_master_ += 2;
         }
     }
     if (exhausted) {
@@ -3543,6 +3548,75 @@ void ProjectState::write_buses_to_document_locked() {
     document_["buses"] = std::move(arr);
 }
 
+bool ProjectState::allocate_master_pair_locked(audio::MasterChannelIndex& l,
+                                               audio::MasterChannelIndex& r) {
+    const audio::MasterChannelIndex bus_width     = engine_.config().master_channels;
+    const audio::MasterChannelIndex reserved_base = audio::preview_master_base(bus_width);
+    if (next_override_master_ + 1 >= reserved_base) return false;
+    l = next_override_master_;
+    r = next_override_master_ + 1;
+    next_override_master_ += 2;
+    return true;
+}
+
+void ProjectState::wire_bus_to_output(const BusDef& bus,
+                                      const audio::MixerChannelId& mixer) {
+    // What "FOH" means on this machine. Unmapped names fall back to being
+    // treated as a device name, which is what keeps a fresh install and
+    // migrated device overrides working with no configuration.
+    const auto channels = outputs_.resolve(bus.output_target);
+    if (channels.empty()) {
+        Logger::warn("bus '{}': output '{}' resolves to nothing; leaving it silent",
+                     bus.display_name, bus.output_target);
+        return;
+    }
+
+    audio::MasterChannelIndex master_l = 0;
+    audio::MasterChannelIndex master_r = 0;
+    bool have_pair = false;
+    {
+        std::lock_guard lock{mutex_};
+        have_pair = allocate_master_pair_locked(master_l, master_r);
+    }
+    if (!have_pair) {
+        Logger::error("bus '{}': out of master channels; leaving it silent",
+                      bus.display_name);
+        return;
+    }
+
+    // One master channel per physical output channel, up to the stereo cap.
+    const std::size_t used = std::min<std::size_t>(channels.size(), 2);
+    const audio::MasterChannelIndex masters[2] = {master_l, master_r};
+    for (std::size_t i = 0; i < used; ++i) {
+        const auto dev = engine_.open_device_by_name(channels[i].device, 2);
+        if (dev.empty()) {
+            Logger::warn("bus '{}': could not open device '{}'",
+                         bus.display_name, channels[i].device);
+            continue;
+        }
+        engine_.assign_master_to_device(masters[i], dev, channels[i].hw_channel);
+    }
+
+    if (bus.width >= 2 && used >= 2) {
+        engine_.route_mixer_to_master(mixer, master_l, 0.0f, 0);   // L
+        engine_.route_mixer_to_master(mixer, master_r, 0.0f, 1);   // R
+    } else if (bus.width >= 2) {
+        // Stereo bus folded into a mono output: both lanes at the pan law.
+        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 1);
+    } else if (used >= 2) {
+        // Mono bus centred across a stereo output.
+        engine_.route_mixer_to_master(mixer, master_l, audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(mixer, master_r, audio::kDefaultDownmixDb, 0);
+    } else {
+        engine_.route_mixer_to_master(mixer, master_l, 0.0f, 0);
+    }
+
+    Logger::info("bus '{}' → output '{}' (masters {}/{}{})",
+                 bus.display_name, bus.output_target, master_l, master_r,
+                 outputs_.has(bus.output_target) ? "" : ", unmapped: name used as device");
+}
+
 void ProjectState::materialise_buses() {
     std::vector<BusDef>                                    defs;
     std::unordered_map<std::string, audio::MixerChannelId> previous;
@@ -3575,9 +3649,9 @@ void ProjectState::materialise_buses() {
             m->set_gain_db(b.gain_db);
             m->set_mute(b.muted);
         }
-        // Only Master-kind output is wired in this slice. Bus→bus needs the
-        // topological ordering that does not exist yet, and named outputs need
-        // the logical-output map; both are separate stages.
+        // Bus→bus is the one kind still unwired: it needs the topological
+        // ordering that does not exist yet. Such a bus stays silent rather
+        // than being quietly rerouted somewhere it was not asked to go.
         if (b.output_kind == BusOutputKind::Master) {
             if (b.width >= 2) {
                 engine_.route_mixer_to_master(mixer, 0, 0.0f, 0);   // L
@@ -3588,6 +3662,11 @@ void ProjectState::materialise_buses() {
                 engine_.route_mixer_to_master(mixer, 0, audio::kDefaultDownmixDb, 0);
                 engine_.route_mixer_to_master(mixer, 1, audio::kDefaultDownmixDb, 0);
             }
+        } else if (b.output_kind == BusOutputKind::Output) {
+            wire_bus_to_output(b, mixer);
+        } else {
+            Logger::warn("bus '{}' feeds another bus; bus→bus routing is not "
+                         "implemented yet, so it is silent", b.display_name);
         }
         created[b.id] = mixer;
     }

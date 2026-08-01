@@ -778,7 +778,13 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     // Project state + control plane (Milestone 3)
     // ------------------------------------------------------------------
-    auto project = std::make_unique<core::ProjectState>(*engine);
+    // Logical output name → hardware for this machine. Server-owned and kept
+    // out of project files, so a show stays portable between venues.
+    auto outputs = std::make_unique<core::OutputMap>();
+    outputs->set_path(exe_dir / "outputs.json");
+    outputs->load();   // absent file is fine — names resolve by identity
+
+    auto project = std::make_unique<core::ProjectState>(*engine, *outputs);
     auto backup  = std::make_unique<core::BackupManager>(*project);
     backup->start();
 

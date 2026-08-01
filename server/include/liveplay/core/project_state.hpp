@@ -22,6 +22,7 @@
 
 #include "liveplay/audio/engine.hpp"
 #include "liveplay/audio/types.hpp"
+#include "liveplay/core/output_map.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -135,7 +136,7 @@ struct RepairInfo {
 
 class ProjectState {
 public:
-    explicit ProjectState(audio::AudioEngine& engine);
+    ProjectState(audio::AudioEngine& engine, OutputMap& outputs);
     ~ProjectState();
 
     // Load a project file (.liveplay JSON). Returns true on success. On
@@ -456,6 +457,8 @@ public:
 
 private:
     audio::AudioEngine&        engine_;
+    // Logical output name → hardware, owned by the server (see output_map.hpp).
+    OutputMap&                 outputs_;
     mutable std::mutex         mutex_;
     std::mutex                 mirror_mutex_;
 
@@ -545,6 +548,13 @@ private:
     std::string resolve_item_bus(const std::string& item_uuid) const;
     // Engine strip for a bus id, or empty if unknown / not materialised.
     audio::MixerChannelId mixer_for_bus(const std::string& bus_id) const;
+    // Reserve the next free pair of master channels below the preview reserve.
+    // False when the bus is exhausted. Caller holds mutex_.
+    bool allocate_master_pair_locked(audio::MasterChannelIndex& l,
+                                     audio::MasterChannelIndex& r);
+    // Wire one Output-kind bus to the hardware its logical name resolves to.
+    // Caller must NOT hold mutex_.
+    void wire_bus_to_output(const BusDef& bus, const audio::MixerChannelId& mixer);
     // Next free master channel pair when allocating new device routings.
     // Default device occupies 0/1; preview occupies the top pair of the bus
     // (see audio::preview_master_base); overrides start here and step by 2.
