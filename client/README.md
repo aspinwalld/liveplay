@@ -175,7 +175,7 @@ The component tree is intentionally flat — every SFC lives directly in [`compo
 - `PropertiesPanel.vue` — properties for the selected item (gain, fades, behaviours, ducking).
 - `WaveformCanvas.vue` — canvas-rendered waveform fetched from `GET /api/waveform/<cueId>`.
 - `WaveformTrimmer.vue` — interactive in/out trimming + normalise.
-- `RoutingMatrixPanel.vue` — the 3-tier routing matrix UI.
+- `MixerPanel.vue`, `MixerStrip.vue`, `MixerChannelDetails.vue` — the mixer: one channel strip per bus, with a per-bus detail view. Docks as a side pane or takes the full workspace.
 - `LiveMeterBar.vue`, `StereoMeter.vue`, `VUMeter.vue` — meter widgets driven by `useLiveMeters`.
 - `ServerSettingsModal.vue`, `LocalServerStatus.vue`, `ConnectionLostModal.vue` — server connection management.
 - `ServerFileBrowser.vue`, `ServerFilePickerModal.vue` — `GET /api/fs/list` browser, used when the client and server live on different machines.

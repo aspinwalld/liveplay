@@ -85,7 +85,7 @@
         <VolumeSlider
           :db="getOutputGainDb(pair.leftIndex)"
           :min-db="-60"
-          :max-db="40"
+          :max-db="12"
           :title="pair.label"
           @input="(db: number) => onOutputGainInput(pair.leftIndex, pair.rightIndex, db)"
           @reset="resetOutputGain(pair.leftIndex, pair.rightIndex)"

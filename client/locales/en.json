@@ -218,6 +218,7 @@
     "busInherit": "Inherit",
     "busNone": "No buses yet — add one in the mixer.",
     "busHelp": "Which bus this cue plays through. Where that bus goes — output, level, processing — is set in the mixer.",
+    "busGroupHelp": "Which bus this group's cues play through. A cue inside it follows this unless it sets its own.",
     "busEffective": "Inheriting: {name}",
     "ducking": "Ducking",
     "duckLevel": "Duck Level",

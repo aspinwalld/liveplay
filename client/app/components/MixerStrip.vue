@@ -81,7 +81,7 @@
       <CanvasFader
         :db="gainDb"
         :min-db="-60"
-        :max-db="6"
+        :max-db="12"
         :width="touch ? 32 : 20"
         @input="onFader"
         @reset="onFader(0)"

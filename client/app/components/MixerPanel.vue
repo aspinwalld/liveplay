@@ -59,7 +59,7 @@
           <CanvasFader
             :db="masterGainDb"
             :min-db="-60"
-            :max-db="6"
+            :max-db="12"
             :width="touch ? 32 : 24"
             @input="onMasterGain"
             @reset="onMasterGain(0)"
@@ -110,7 +110,11 @@ const { t } = useLocalization();
 const { uiMode } = useUiMode();
 const touch = computed(() => uiMode.value === 'playback');
 
-const selectedId  = ref('');
+// Shared rather than local: switching between docked and full swaps which
+// MixerPanel instance is mounted, so a local ref would be destroyed with the
+// old one and the selection would be lost exactly when opening details forces
+// that switch — which looked like needing to click twice.
+const selectedId  = useState<string>('liveplay:mixerSelectedBus', () => '');
 const outputNames = ref<string[]>([]);
 
 // The master strip drives the *same* parameter as the transport bar's Main

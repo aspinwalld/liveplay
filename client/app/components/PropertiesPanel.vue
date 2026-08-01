@@ -124,24 +124,32 @@
       </div>
       
       <!-- Output Tab -->
-      <div v-if="activeTab === 'output' && selectedItem.type === 'audio'" class="tab-panel">
+      <div v-if="activeTab === 'output'" class="tab-panel">
         <!-- Bus assignment is the whole of an item's routing. Where that bus
              then goes — hardware, level, processing — is the mixer's business,
-             not the item's. -->
+             not the item's. Groups carry it too: children inherit unless they
+             assign their own. -->
         <div class="property-field">
           <label>{{ t('properties.bus') }}</label>
-          <select :value="(audioItem as any).busId ?? ''" @change="onBusChange">
+          <select :value="(selectedItem as any).busId ?? ''" @change="onBusChange">
             <option value="">{{ t('properties.busInherit') }}</option>
             <option v-for="b in assignableBuses" :key="b.id" :value="b.id">{{ b.name }}</option>
           </select>
-          <p class="property-help">{{ t('properties.busHelp') }}</p>
-          <p v-if="effectiveBusName" class="property-help">
+          <p class="property-help">
+            {{ selectedItem.type === 'group' ? t('properties.busGroupHelp') : t('properties.busHelp') }}
+          </p>
+          <p v-if="assignableBuses.length === 0" class="property-help">{{ t('properties.busNone') }}</p>
+          <p v-else-if="effectiveBusName" class="property-help">
             {{ t('properties.busEffective', { name: effectiveBusName }) }}
           </p>
         </div>
 
-        <!-- LTC Output Section -->
-        <div class="property-field" :class="{ 'field-disabled': !ltcDeviceConfigured }">
+        <!-- LTC Output Section — audio items only; a group has no timecode. -->
+        <div
+          v-if="selectedItem.type === 'audio' && audioItem"
+          class="property-field"
+          :class="{ 'field-disabled': !ltcDeviceConfigured }"
+        >
           <label class="ltc-checkbox-label">
             <input
               type="checkbox"
@@ -337,15 +345,18 @@ const assignableBuses = computed(() =>
 // What the item actually resolves to, which is not the same as what is written
 // on it: with no assignment of its own it may still inherit one from a group.
 const effectiveBusName = computed(() => {
-  const it = audioItem.value as any;
-  if (!it?.uuid || it.busId) return '';
+  const it = selectedItem.value as any;
+  // Only meaningful for a cue: a group's own "effective" bus is whatever it
+  // inherits, but nothing reports group membership.
+  if (!it?.uuid || it.busId || it.type !== 'audio') return '';
   const owner = (_server.buses ?? []).find((b: any) => b.itemUuids?.includes(it.uuid));
   return owner?.name ?? '';
 });
 
 const onBusChange = async (e: Event) => {
   const v = (e.target as HTMLSelectElement).value;
-  const it = audioItem.value as any;
+  const it = selectedItem.value as any;
+  if (!it) return;
   if (!v) delete it.busId; else it.busId = v;
   handleSave();
   // Membership is resolved server-side, so refresh the mixer's view of it.
@@ -421,7 +432,9 @@ const allTabs = computed<Tab[]>(() => [
   { id: 'basic', label: t('properties.basicInfo'), icon: 'info' },
   { id: 'media', label: t('properties.media'), icon: 'audio_file', audioOnly: true },
   { id: 'playback', label: t('properties.playback'), icon: 'play_circle', audioOnly: true },
-  { id: 'output', label: t('properties.output'), icon: 'speaker', audioOnly: true },
+  // Not audioOnly: a group carries a bus assignment too, which is how a whole
+  // folder of cues is routed in one move and what its children inherit.
+  { id: 'output', label: t('properties.output'), icon: 'speaker' },
   { id: 'ducking', label: t('properties.ducking'), icon: 'volume_down', audioOnly: true },
   { id: 'startBehavior', label: t('properties.startBehavior'), icon: 'play_arrow' },
   { id: 'endBehavior', label: t('properties.endBehavior'), icon: 'stop_circle' }
