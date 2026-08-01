@@ -562,6 +562,9 @@ private:
     // migrating legacy per-item deviceOverride values into real buses. Caller
     // holds mutex_.
     void load_buses_locked();
+    // One-way conversion of the pre-bus per-item `deviceOverride` field into
+    // buses. Caller holds mutex_; runs as part of load_buses_locked().
+    void migrate_device_overrides_locked();
     // Create an engine mixer strip per bus and wire its output. Caller must
     // NOT hold mutex_ (engine calls take their own locks).
     void materialise_buses();

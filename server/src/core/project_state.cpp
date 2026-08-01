@@ -3485,6 +3485,20 @@ void ProjectState::release_device_routings_locked() {
 // audio goes. Definitions live in document_["buses"] and are materialised onto
 // engine strips whenever a project loads.
 // ---------------------------------------------------------------------------
+namespace {
+// Human-readable, stable-ish bus id derived from a name, so the document stays
+// legible instead of carrying opaque uuids. Uniqueness is the caller's problem.
+std::string bus_id_from_name(const std::string& name) {
+    std::string id;
+    for (char c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c))) id += static_cast<char>(std::tolower(c));
+        else if (!id.empty() && id.back() != '-')        id += '-';
+    }
+    while (!id.empty() && id.back() == '-') id.pop_back();
+    return id.empty() ? std::string{"bus"} : id;
+}
+}  // namespace
+
 void ProjectState::load_buses_locked() {
     buses_.clear();
     std::unordered_set<std::string> seen;
@@ -3531,8 +3545,68 @@ void ProjectState::load_buses_locked() {
     ensure_system(kMainBusId,    "Main",    0);
     ensure_system(kMonitorBusId, "Monitor", 1'000'000);
 
+    migrate_device_overrides_locked();
+
     std::stable_sort(buses_.begin(), buses_.end(),
                      [](const BusDef& a, const BusDef& b) { return a.order < b.order; });
+}
+
+// Convert the legacy per-item `deviceOverride` into real buses.
+//
+// Before buses existed, "play this cue out of the other sound card" was a
+// device name written on the item. Each distinct device becomes one bus whose
+// output targets that name; because an unmapped logical name resolves back to
+// a device of the same name (see OutputMap::resolve), the audio lands exactly
+// where it did before. The field is then dropped — a project should carry one
+// routing concept, not two.
+void ProjectState::migrate_device_overrides_locked() {
+    std::unordered_map<std::string, std::string> device_to_bus;
+    int migrated = 0;
+
+    for_each_item(document_, [&](json& item, const std::string&) {
+        if (!item.contains("deviceOverride")) return;
+        std::string device;
+        if (item["deviceOverride"].is_string()) device = item["deviceOverride"].get<std::string>();
+        item.erase("deviceOverride");
+        if (device.empty()) return;
+
+        // An explicit bus assignment already says where this goes; the legacy
+        // field is just stale, so drop it and leave the assignment alone.
+        if (item.contains("busId") && item["busId"].is_string() &&
+            !item["busId"].get<std::string>().empty()) {
+            return;
+        }
+
+        auto it = device_to_bus.find(device);
+        if (it == device_to_bus.end()) {
+            const std::string base = bus_id_from_name(device);
+            std::string       id   = base;
+            for (int n = 2; ; ++n) {
+                bool taken = false;
+                for (const auto& b : buses_) if (b.id == id) { taken = true; break; }
+                if (!taken) break;
+                id = base + "-" + std::to_string(n);
+            }
+            BusDef d;
+            d.id            = id;
+            d.display_name  = device;
+            d.width         = 2;
+            d.output_kind   = BusOutputKind::Output;
+            d.output_target = device;
+            int max_order = 0;
+            for (const auto& b : buses_) if (!b.system) max_order = std::max(max_order, b.order);
+            d.order = max_order + 1;
+            buses_.push_back(d);
+            it = device_to_bus.emplace(device, id).first;
+        }
+        item["busId"] = it->second;
+        ++migrated;
+    });
+
+    if (migrated > 0) {
+        Logger::info("migrated {} item(s) from deviceOverride onto {} bus(es)",
+                     migrated, device_to_bus.size());
+    }
 }
 
 void ProjectState::write_buses_to_document_locked() {
@@ -3733,20 +3807,6 @@ void ProjectState::materialise_buses() {
 // Bus mutation. Each of these updates document_["buses"] so the change is
 // saved, and touches only the affected strip so unrelated buses keep playing.
 // ---------------------------------------------------------------------------
-namespace {
-// Human-readable, stable-ish bus id derived from the name, so the document
-// stays legible. Uniqueness is the caller's problem.
-std::string bus_id_from_name(const std::string& name) {
-    std::string id;
-    for (char c : name) {
-        if (std::isalnum(static_cast<unsigned char>(c))) id += static_cast<char>(std::tolower(c));
-        else if (!id.empty() && id.back() != '-')        id += '-';
-    }
-    while (!id.empty() && id.back() == '-') id.pop_back();
-    return id.empty() ? std::string{"bus"} : id;
-}
-}  // namespace
-
 std::optional<BusDef> ProjectState::create_bus(const json& spec) {
     BusDef d;
     d.display_name = spec.value("name", std::string{"Bus"});
