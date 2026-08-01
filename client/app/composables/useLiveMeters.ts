@@ -56,7 +56,16 @@ export function useCueMeters(cueId: () => CueId | null | undefined) {
   return { sources, transport, playhead };
 }
 
-export function useMixerMeter(mixerId: () => MixerChannelId | null | undefined) {
+/**
+ * Meter stream for one mixer strip.
+ *
+ * `lane` selects a single lane (0 = L, 1 = R) so a stereo bus can show two
+ * meters; omitting it gives the combined reading across lanes, which is what a
+ * mono bus and any compact single-bar display want. Servers predating per-lane
+ * frames simply have no `lanes` array, and fall back to the combined values.
+ */
+export function useMixerMeter(mixerId: () => MixerChannelId | null | undefined,
+                              lane?: () => number | null | undefined) {
   const server = useLiveplayServer();
   const peak    = ref(SILENT.peak_db);
   const rms     = ref(SILENT.rms_db);
@@ -67,9 +76,15 @@ export function useMixerMeter(mixerId: () => MixerChannelId | null | undefined) 
     if (!id) { peak.value = SILENT.peak_db; rms.value = SILENT.rms_db; peakMax.value = SILENT.peak_max_db; return; }
     const frame: MixerMeterFrame | undefined =
       m.mixer_channels.find(x => x.mixer_id === id);
-    peak.value    = frame?.peak_db     ?? SILENT.peak_db;
-    rms.value     = frame?.rms_db      ?? SILENT.rms_db;
-    peakMax.value = frame?.peak_max_db ?? SILENT.peak_max_db;
+
+    const which = lane?.();
+    const src = (which != null && (frame as any)?.lanes?.[which])
+      ? (frame as any).lanes[which]
+      : frame;
+
+    peak.value    = src?.peak_db     ?? SILENT.peak_db;
+    rms.value     = src?.rms_db      ?? SILENT.rms_db;
+    peakMax.value = src?.peak_max_db ?? SILENT.peak_max_db;
   });
   onScopeDispose(() => unsubscribe());
 

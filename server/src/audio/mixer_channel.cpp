@@ -137,6 +137,14 @@ MeterSnapshot MixerChannel::meter_snapshot(ChannelIndex lane) const noexcept {
     return meters_[lane].snapshot();
 }
 
+std::array<MeterSnapshot, kMixerLanes> MixerChannel::meter_snapshot_consume_lanes() noexcept {
+    std::array<MeterSnapshot, kMixerLanes> out{};
+    for (std::size_t i = 0; i < meters_.size() && i < out.size(); ++i) {
+        out[i] = meters_[i].snapshot_consume_max();
+    }
+    return out;
+}
+
 MeterSnapshot MixerChannel::meter_snapshot_consume() noexcept {
     MeterSnapshot out;
     for (auto& m : meters_) {

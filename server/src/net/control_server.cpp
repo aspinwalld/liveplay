@@ -484,16 +484,44 @@ void ControlServer::broadcast_loop() {
         // this section has always serialised empty.
         for (auto& mch : engine_.list_mixer_channels()) {
             if (auto* m = engine_.find_mixer_channel(mch.id)) {
-                auto s = m->meter_snapshot_consume();
+                // One consuming read, split per lane, so a stereo strip can
+                // show separate L/R meters. The combined values are derived
+                // here rather than read again — a second consuming call would
+                // find the maxima already reset.
+                const auto lanes = m->meter_snapshot_consume_lanes();
+
+                audio::MeterSnapshot c{};
+                json lane_arr = json::array();
+                for (const auto& s : lanes) {
+                    c.peak_db          = std::max(c.peak_db,          s.peak_db);
+                    c.rms_db           = std::max(c.rms_db,           s.rms_db);
+                    c.peak_max_db      = std::max(c.peak_max_db,      s.peak_max_db);
+                    c.true_peak_db     = std::max(c.true_peak_db,     s.true_peak_db);
+                    c.true_peak_max_db = std::max(c.true_peak_max_db, s.true_peak_max_db);
+                    // Loudness sums across the channel group (BS.1770).
+                    c.kw_ms   += s.kw_ms;
+                    c.kw_ms_s += s.kw_ms_s;
+                    lane_arr.push_back(json{
+                        {"peak_db",          s.peak_db},
+                        {"rms_db",           s.rms_db},
+                        {"peak_max_db",      s.peak_max_db},
+                        {"true_peak_db",     s.true_peak_db},
+                        {"true_peak_max_db", s.true_peak_max_db},
+                        {"kw_ms",            s.kw_ms},
+                        {"kw_ms_s",          s.kw_ms_s},
+                    });
+                }
+
                 mixer_meters.push_back(json{
                     {"mixer_id",         mch.id.value},
-                    {"peak_db",          s.peak_db},
-                    {"rms_db",           s.rms_db},
-                    {"peak_max_db",      s.peak_max_db},
-                    {"true_peak_db",     s.true_peak_db},
-                    {"true_peak_max_db", s.true_peak_max_db},
-                    {"kw_ms",            s.kw_ms},
-                    {"kw_ms_s",          s.kw_ms_s},
+                    {"peak_db",          c.peak_db},
+                    {"rms_db",           c.rms_db},
+                    {"peak_max_db",      c.peak_max_db},
+                    {"true_peak_db",     c.true_peak_db},
+                    {"true_peak_max_db", c.true_peak_max_db},
+                    {"kw_ms",            c.kw_ms},
+                    {"kw_ms_s",          c.kw_ms_s},
+                    {"lanes",            std::move(lane_arr)},
                 });
             }
         }

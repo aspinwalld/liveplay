@@ -55,11 +55,23 @@
         </div>
         <div class="mixer__masterout">{{ t('mixer.toHardware') }}</div>
         <div class="mixer__masterbody">
-          <StereoMeter :left-index="0" :right-index="1" :min-db="-60" :max-db="0" :show-peak-value="true" />
+          <!-- Same geometry as the channel strips: the meter is dBFS and tops
+               out at 0, so its track covers only that part of the fader's
+               range and 0 dBFS lands on the shared scale's 0 tick. -->
+          <div class="mixer__mastermeter" :style="{ height: METER_TRACK_PCT + '%' }">
+            <StereoMeter
+              :left-index="0"
+              :right-index="1"
+              :min-db="FADER_MIN_DB"
+              :max-db="METER_MAX_DB"
+              :show-peak-value="true"
+            />
+          </div>
+          <MeterScale :min-db="FADER_MIN_DB" :max-db="FADER_MAX_DB" />
           <CanvasFader
             :db="masterGainDb"
-            :min-db="-60"
-            :max-db="12"
+            :min-db="FADER_MIN_DB"
+            :max-db="FADER_MAX_DB"
             :width="touch ? 32 : 24"
             @input="onMasterGain"
             @reset="onMasterGain(0)"
@@ -93,6 +105,10 @@ import MixerStrip from './MixerStrip.vue';
 import MixerChannelDetails from './MixerChannelDetails.vue';
 import StereoMeter from './StereoMeter.vue';
 import CanvasFader from './CanvasFader.vue';
+import MeterScale from './MeterScale.vue';
+import {
+  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
+} from '~/utils/meterScale';
 
 const props = withDefaults(defineProps<{ mode?: 'side' | 'full' }>(), { mode: 'side' });
 const emit = defineEmits<{ (e: 'close'): void; (e: 'mode', mode: 'side' | 'full'): void }>();
@@ -230,7 +246,8 @@ function onMasterGain(db: number) {
   border-left: 1px solid var(--color-border);
   background: var(--color-surface);
 }
-.mixer__masterbody { display: flex; gap: var(--spacing-xs); flex: 1; min-height: 140px; justify-content: center; }
+.mixer__masterbody { display: flex; gap: 3px; flex: 1; min-height: 150px; justify-content: center; }
+.mixer__mastermeter { display: flex; align-self: flex-end; }
 .mixer__masterout {
   text-align: center;
   font-size: 10px;

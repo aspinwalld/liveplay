@@ -67,21 +67,34 @@
       >{{ t('mixer.pfl') }}</button>
     </div>
 
-    <!-- Meter + fader, sharing the dominant vertical space. -->
+    <!-- Meter, shared scale, fader.
+         The scale and fader span the full -60..+12. The meter is dBFS and
+         tops out at 0, so its track is only as tall as that part of the range
+         — 0 dBFS lands exactly on the 0 tick, the meter keeps full resolution
+         across its own range, and there is no dead strip above it that a
+         signal could never reach. One scale stays honest for both because
+         both map dB to position linearly. -->
     <div class="strip__meterfader">
-      <LiveMeterBar
-        v-if="bus.mixerId"
-        source="mixer"
-        :mixer-id="bus.mixerId"
-        vertical
-        :min-db="-60"
-        :max-db="0"
-      />
-      <div v-else class="strip__nometer" :title="t('mixer.noStrip')"></div>
+      <div class="strip__meters" :style="{ height: METER_TRACK_PCT + '%' }">
+        <template v-if="bus.mixerId">
+          <LiveMeterBar
+            v-for="lane in bus.width >= 2 ? [0, 1] : [null]"
+            :key="'lane' + lane"
+            source="mixer"
+            :mixer-id="bus.mixerId"
+            :lane="lane"
+            vertical
+            :min-db="FADER_MIN_DB"
+            :max-db="METER_MAX_DB"
+          />
+        </template>
+        <div v-else class="strip__nometer" :title="t('mixer.noStrip')"></div>
+      </div>
+      <MeterScale :min-db="FADER_MIN_DB" :max-db="FADER_MAX_DB" />
       <CanvasFader
         :db="gainDb"
-        :min-db="-60"
-        :max-db="12"
+        :min-db="FADER_MIN_DB"
+        :max-db="FADER_MAX_DB"
         :width="touch ? 32 : 20"
         @input="onFader"
         @reset="onFader(0)"
@@ -114,6 +127,10 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import LiveMeterBar from './LiveMeterBar.vue';
+import MeterScale from './MeterScale.vue';
+import {
+  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
+} from '~/utils/meterScale';
 
 const props = defineProps<{
   bus: Bus;
@@ -223,7 +240,8 @@ function onOutputChange(e: Event) {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
-  width: 76px;
+  /* Wider than before: two lane meters plus the shared scale plus the fader. */
+  width: 88px;
   flex: 0 0 auto;
   padding: var(--spacing-xs);
   background: var(--color-surface);
@@ -232,7 +250,7 @@ function onOutputChange(e: Event) {
   cursor: pointer;
   transition: border-color var(--transition-fast);
 }
-.strip--touch { width: 118px; }
+.strip--touch { width: 132px; }
 .strip:hover { border-color: var(--color-text-disabled); }
 .strip--selected { border-color: var(--color-accent); }
 .strip--muted .strip__meterfader { opacity: 0.45; }
@@ -285,12 +303,20 @@ function onOutputChange(e: Event) {
 
 .strip__meterfader {
   display: flex;
-  gap: var(--spacing-xs);
+  gap: 3px;
   justify-content: center;
+  /* Default stretch: the scale and fader must span the full range. Only the
+     meter block is shorter, and it aligns to the bottom (below) so its
+     0 dBFS top edge lands on the scale's 0 tick. */
   flex: 1;
-  min-height: 140px;
+  min-height: 150px;
 }
-.strip__nometer { width: 6px; background: var(--color-background); border-radius: 2px; }
+.strip__meters {
+  display: flex;
+  gap: 2px;
+  align-self: flex-end;
+}
+.strip__nometer { width: 6px; height: 100%; background: var(--color-background); border-radius: 2px; }
 
 .strip__gain {
   text-align: center;

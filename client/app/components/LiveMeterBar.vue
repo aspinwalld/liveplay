@@ -20,6 +20,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useCueMeters, useMixerMeter, useMasterMeter } from '~/composables/useLiveMeters';
+import { useOutputTarget, METER_COLORS } from '~/composables/useOutputTarget';
 
 type Source = 'cue' | 'mixer' | 'master';
 
@@ -28,6 +29,8 @@ const props = withDefaults(defineProps<{
   cueId?: string | null;
   channel?: number;
   mixerId?: string | null;
+  /** Mixer lane: 0 = L, 1 = R. Omit for the combined reading. */
+  lane?: number | null;
   index?: number | null;
   vertical?: boolean;
   showLabel?: boolean;
@@ -37,6 +40,7 @@ const props = withDefaults(defineProps<{
   channel: 0,
   cueId: null,
   mixerId: null,
+  lane: null,
   index: null,
   vertical: false,
   showLabel: false,
@@ -45,7 +49,7 @@ const props = withDefaults(defineProps<{
 });
 
 const cueStream    = props.source === 'cue'    ? useCueMeters(() => props.cueId)    : null;
-const mixerStream  = props.source === 'mixer'  ? useMixerMeter(() => props.mixerId) : null;
+const mixerStream  = props.source === 'mixer'  ? useMixerMeter(() => props.mixerId, () => props.lane) : null;
 const masterStream = props.source === 'master' ? useMasterMeter(() => props.index)  : null;
 
 const peakDb = computed<number>(() => {
@@ -63,20 +67,26 @@ const rmsDb = computed<number>(() => {
 const gainReduction = computed<number | null>(() =>
   masterStream ? masterStream.gainReduction.value : null);
 
-// EBU R128-inspired gradient matching StereoMeter.vue
+// Zone gradient driven by the project's output target — the same numbers
+// StereoMeter uses — rather than hardcoded thresholds. The zones are
+// platform-specific (EBU R128, Streaming, Radio, Netflix, Live), so a fixed
+// gradient here meant a bus meter and the master meter disagreed about where
+// "hot" starts on every target except the default.
+const { levels } = useOutputTarget();
+
 const ebuGradient = computed(() => {
   const { minDb, maxDb } = props;
   const range = maxDb - minDb;
   const p = (db: number) =>
     Math.min(100, Math.max(0, ((db - minDb) / range) * 100)).toFixed(2);
-  // Horizontal meter: gradient runs left→right
+  const L = levels.value;
   const dir = props.vertical ? 'to top' : 'to right';
   return (
     `linear-gradient(${dir},` +
-    `#00b8d4 0%,#00b8d4 ${p(-40)}%,` +
-    `#00e676 ${p(-40)}%,#00e676 ${p(-18)}%,` +
-    `#ffc400 ${p(-18)}%,#ffc400 ${p(-9)}%,` +
-    `#ff1744 ${p(-9)}%,#ff1744 100%)`
+    `${METER_COLORS.blue} 0%,${METER_COLORS.blue} ${p(L.blueBelow)}%,` +
+    `${METER_COLORS.green} ${p(L.greenMin)}%,${METER_COLORS.green} ${p(L.greenMax)}%,` +
+    `${METER_COLORS.yellow} ${p(L.yellowMin)}%,${METER_COLORS.yellow} ${p(L.yellowMax)}%,` +
+    `${METER_COLORS.red} ${p(L.redAbove)}%,${METER_COLORS.red} 100%)`
   );
 });
 

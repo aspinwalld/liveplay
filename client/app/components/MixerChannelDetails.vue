@@ -60,18 +60,23 @@
       <section class="det__col">
         <h4 class="det__h">{{ t('mixer.channel') }}</h4>
         <div class="det__meterfader">
-          <LiveMeterBar
-            v-if="bus.mixerId"
-            source="mixer"
-            :mixer-id="bus.mixerId"
-            vertical
-            :min-db="-60"
-            :max-db="0"
-          />
+          <div class="det__meters" :style="{ height: METER_TRACK_PCT + '%' }">
+            <LiveMeterBar
+              v-for="lane in (bus.mixerId ? (bus.width >= 2 ? [0, 1] : [null]) : [])"
+              :key="'lane' + lane"
+              source="mixer"
+              :mixer-id="bus.mixerId"
+              :lane="lane"
+              vertical
+              :min-db="FADER_MIN_DB"
+              :max-db="METER_MAX_DB"
+            />
+          </div>
+          <MeterScale :min-db="FADER_MIN_DB" :max-db="FADER_MAX_DB" />
           <CanvasFader
             :db="bus.gainDb"
-            :min-db="-60"
-            :max-db="6"
+            :min-db="FADER_MIN_DB"
+            :max-db="FADER_MAX_DB"
             :width="28"
             @input="(db: number) => $emit('patch', bus.id, { gainDb: db })"
             @reset="$emit('patch', bus.id, { gainDb: 0 })"
@@ -160,6 +165,10 @@ import { computed, ref } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import LiveMeterBar from './LiveMeterBar.vue';
+import MeterScale from './MeterScale.vue';
+import {
+  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
+} from '~/utils/meterScale';
 
 const props = defineProps<{
   bus: Bus;
@@ -276,7 +285,8 @@ function itemName(uuid: string): string {
   color: var(--color-text-secondary);
 }
 
-.det__meterfader { display: flex; gap: var(--spacing-xs); height: 120px; }
+.det__meterfader { display: flex; gap: var(--spacing-xs); height: 140px; }
+.det__meters { display: flex; gap: 2px; align-self: flex-end; }
 .det__gain { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-primary); }
 .det__pair { display: flex; gap: 4px; }
 .det__btn {

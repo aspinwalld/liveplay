@@ -92,6 +92,12 @@ public:
     // Broadcaster only.
     MeterSnapshot meter_snapshot_consume() noexcept;
 
+    // Per-lane consuming read. Use *instead of* meter_snapshot_consume(), not
+    // alongside it: both reset the max-since-read, so calling each in turn
+    // would leave the second one reading silence. Returns one snapshot per
+    // lane so a stereo strip can show separate L/R meters.
+    std::array<MeterSnapshot, kMixerLanes> meter_snapshot_consume_lanes() noexcept;
+
 private:
     MixerChannelId id_;
     std::string    display_name_;
