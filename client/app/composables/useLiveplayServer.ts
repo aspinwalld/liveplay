@@ -22,6 +22,7 @@
 //   watch(server.connected, ...);        // react to connection state
 // =====================================================================
 import { reactive, ref, shallowRef, computed } from 'vue';
+import type { Bus } from '~/types/project';
 import type {
   CueId,
   DeviceId,
@@ -241,7 +242,7 @@ function createClient() {
       void refreshIsLocalServer();
       if (!hasEverConnected) {
         hasEverConnected = true;
-        void Promise.allSettled([fetchCues(), fetchMixerChannels(), fetchDevices()]);
+        void Promise.allSettled([fetchCues(), fetchMixerChannels(), fetchDevices(), fetchBuses()]);
       } else {
         // On reconnect, the server's playback_snapshot (sent immediately
         // after the WS open) covers transport/up-next/preview state, but
@@ -333,6 +334,10 @@ function createClient() {
           break;
         }
         case 'doc_patch': {
+          // Another client changed the mixer — refetch so this one converges.
+          // The payload carries the definitions, but not the resolved item
+          // membership, which only the server can compute.
+          if (payload.op === 'buses_patched') void fetchBuses();
           // Handle output_channel_gain_changed locally before fanning out.
           if (payload.op === 'output_channel_gain_changed' &&
               typeof payload.channel === 'number' &&
@@ -837,6 +842,63 @@ function createClient() {
     fetchMixerChannels().catch(() => {});
   }
 
+  // ---- Buses --------------------------------------------------------
+  // The user-facing mixer. Every mutation is authoritative on the server, so
+  // the local list is refreshed from it rather than patched optimistically —
+  // creating a bus can be refused at the strip limit, and deleting one
+  // reassigns items, neither of which the client can predict.
+  const buses = ref<Bus[]>([]);
+
+  async function fetchBuses() {
+    try {
+      buses.value = await rest<Bus[]>('/api/buses');
+    } catch { /* offline; the WS reconnect path refetches */ }
+    return buses.value;
+  }
+
+  async function createBus(spec: Partial<Bus> & { name: string }) {
+    const out = await rest<{ id: string }>('/api/buses', {
+      method: 'POST',
+      body: JSON.stringify(spec),
+    });
+    await fetchBuses();
+    return out.id;
+  }
+
+  async function patchBus(id: string, patch: Partial<Bus>) {
+    await rest(`/api/buses/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    await fetchBuses();
+  }
+
+  async function deleteBus(id: string) {
+    await rest(`/api/buses/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await fetchBuses();
+  }
+
+  // Assign an item (or group) to a bus. Passing null clears the assignment so
+  // it inherits from its group, or falls back to Main.
+  async function setItemBus(uuid: string, busId: string | null) {
+    await rest(`/api/project/items/${encodeURIComponent(uuid)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ busId }),
+    });
+    // Membership is resolved server-side (an item can inherit its bus from a
+    // group), so refetch rather than guessing which bus it landed on.
+    await fetchBuses();
+  }
+
+  // ---- Logical outputs (server-owned; never in the project) ----------
+  async function fetchOutputs() {
+    return rest<{ version: number; outputs: Array<{ name: string; channels: Array<{ device: string; hwChannel: number }> }> }>(
+      '/api/outputs');
+  }
+  async function saveOutputs(map: unknown) {
+    return rest('/api/outputs', { method: 'PUT', body: JSON.stringify(map) });
+  }
+
   // ---- Devices ------------------------------------------------------
   async function openDevice(name = '', channels = 2) {
     const out = await rest<{ device_id: DeviceId }>('/api/devices/open', {
@@ -1116,6 +1178,16 @@ function createClient() {
     outputChannelGains,
     setOutputChannelGainDb,
     masterBus,
+
+    // buses
+    buses,
+    fetchBuses,
+    createBus,
+    patchBus,
+    deleteBus,
+    setItemBus,
+    fetchOutputs,
+    saveOutputs,
 
     // cart bindings
     setCartSlot,

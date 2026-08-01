@@ -141,6 +141,42 @@ export interface CartItem {
   index: number[]; // [-1, slot] for API triggering
 }
 
+/**
+ * Where a bus sends its audio.
+ *
+ * `target` is a bus id for `bus`, or a *logical* output name for `output`
+ * ("FOH", "Comms"). It is never a device name — the server owns the mapping
+ * from a logical name to real hardware, which is what keeps a show portable
+ * between venues.
+ */
+export interface BusOutput {
+  type: 'master' | 'bus' | 'output';
+  target: string;
+}
+
+/**
+ * A bus is the user-facing mixer strip. Items and groups are assigned to one
+ * via `busId` and carry no other routing; the bus alone decides where the
+ * audio goes, and it is edited from the mixer rather than per item.
+ */
+export interface Bus {
+  id: string;
+  name: string;
+  color: string;
+  order: number;
+  /** 1 = mono, 2 = stereo. Wider buses are a separate design conversation. */
+  width: number;
+  gainDb: number;
+  mute: boolean;
+  /** Main and Monitor: always present, cannot be deleted. */
+  system: boolean;
+  output: BusOutput;
+  /** Engine strip backing this bus; empty when it has none (Main today). */
+  mixerId: string;
+  /** Items resolving to this bus, including ones inheriting it from a group. */
+  itemUuids: string[];
+}
+
 export interface ProjectSettings {
   defaultOutputDevice?: string | null;
   previewDevice?: string | null;

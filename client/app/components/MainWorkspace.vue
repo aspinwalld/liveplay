@@ -8,7 +8,13 @@
     <ProjectHeader />
     <PlaybackControls />
 
-    <div class="workspace-content">
+    <!-- The mixer takes over the workspace rather than sharing it: strips need
+         the full height, and there is no router to give it a page of its own. -->
+    <div v-if="mixerOpen" class="workspace-content">
+      <MixerPanel @close="mixerOpen = false" />
+    </div>
+
+    <div v-else class="workspace-content">
       <div v-if="!cartFullscreen" class="playlist-section" :style="{ width: (cartClosed || cartDetached) ? '100%' : `calc(100% - ${cartWidth}px)` }">
         <PlaylistView />
       </div>
@@ -94,6 +100,10 @@ const progressModal = ref({
 });
 
 // Resizable cart width
+// Shared with ProjectHeader's toggle. There is no router, so views are panel
+// swaps driven by a flag — the same shape cartFullscreen / cartClosed use.
+const mixerOpen = useState<boolean>('liveplay:mixerOpen', () => false);
+
 const cartWidth = ref(500);
 const isResizing = ref(false);
 const cartClosed = ref(false);

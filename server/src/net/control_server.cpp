@@ -479,7 +479,10 @@ void ControlServer::broadcast_loop() {
         payload["items"] = std::move(item_meters);
 
         json mixer_meters = json::array();
-        for (auto& mch : state_.list_mixer_channels()) {
+        // Engine strips, not ProjectState's legacy mixers_ table — that table
+        // is cleared and never repopulated on the client document path, so
+        // this section has always serialised empty.
+        for (auto& mch : engine_.list_mixer_channels()) {
             if (auto* m = engine_.find_mixer_channel(mch.id)) {
                 auto s = m->meter_snapshot_consume();
                 mixer_meters.push_back(json{

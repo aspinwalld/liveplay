@@ -28,6 +28,12 @@
       <!-- Appears the moment the socket drops; spins for as long as we retry. -->
       <ConnectionStatusPill />
 
+      <Btn
+        icon="graphic_eq"
+        :text="t('mixer.title')"
+        :class="{ 'btn--active': mixerOpen }"
+        @click="mixerOpen = !mixerOpen"
+      />
       <Btn icon="tune" :text="t('settings.title')" @click="showProjectSettings = true" />
       <Btn icon="keyboard" :text="t('controls.shortcutBtn')" @click="showControlConfig = true" />
 
@@ -105,6 +111,8 @@ const { uiMode, toggleUiMode } = useUiMode();
 
 const showControlConfig = ref(false);
 const showProjectSettings = useState('showProjectSettings', () => false);
+// Shared with MainWorkspace, which swaps the mixer in for the playlist/cart.
+const mixerOpen = useState<boolean>('liveplay:mixerOpen', () => false);
 
 const isDark = computed(() => currentProject.value?.theme.mode === 'dark');
 const currentTime = ref('00:00:00');
