@@ -32,9 +32,9 @@
       <MainWorkspace v-else />
 
       <!-- TEMPORARY (remove before merge): RoutingMatrixPanel has never been
-           mounted anywhere, so it has never actually been seen. Append
-           ?routingMatrix=1 to the URL to render it over the workspace for a
-           look. Scaffolding for the bus/mixer design review only. -->
+           mounted anywhere, so it has never actually been seen. Press
+           Ctrl+Alt+M (or append ?routingMatrix=1) to render it over the
+           workspace for a look. Scaffolding for the design review only. -->
       <div v-if="showRoutingMatrix" class="routing-matrix-preview" @click.self="showRoutingMatrix = false">
         <div class="routing-matrix-preview__sheet">
           <div class="routing-matrix-preview__bar">
@@ -203,11 +203,29 @@ import { useLiveplayServer } from '~/composables/useLiveplayServer';
 const serverRoot = useLiveplayServer();
 const showRoutingMatrix = ref(false);
 const routingPreviewCueId = ref<string>('');
+function toggleRoutingMatrix() {
+  showRoutingMatrix.value = !showRoutingMatrix.value;
+  if (showRoutingMatrix.value) void serverRoot.fetchCues();
+}
+function onRoutingMatrixKey(e: KeyboardEvent) {
+  // Ctrl+Alt+M. Works inside the normal Electron app, so there's no need to
+  // fight the URL to see the panel.
+  if (e.ctrlKey && e.altKey && (e.key === 'm' || e.key === 'M')) {
+    e.preventDefault();
+    toggleRoutingMatrix();
+  }
+}
 onMounted(() => {
   if (typeof window === 'undefined') return;
-  showRoutingMatrix.value =
-    new URLSearchParams(window.location.search).get('routingMatrix') === '1';
-  if (showRoutingMatrix.value) void serverRoot.fetchCues();
+  if (new URLSearchParams(window.location.search).get('routingMatrix') === '1') {
+    toggleRoutingMatrix();
+  }
+  window.addEventListener('keydown', onRoutingMatrixKey);
+});
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('keydown', onRoutingMatrixKey);
+  }
 });
 watch(() => serverRoot.cues, list => {
   if (!routingPreviewCueId.value && list?.length) routingPreviewCueId.value = list[0].id;
