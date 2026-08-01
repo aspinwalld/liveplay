@@ -1558,8 +1558,13 @@ void ControlServer::install_routes() {
     // ---- Mixer channels ----
     CROW_ROUTE(app, "/api/mixers").methods(crow::HTTPMethod::Get)
         ([this] {
+            // Enumerate the engine's live strips, not ProjectState's legacy
+            // mixers_ table. POST/DELETE here have always operated on the
+            // engine, while this listed the table — which the client-format
+            // load path clears and never repopulates, so it always read empty
+            // and a strip created through this API could never be seen again.
             json arr = json::array();
-            for (auto& m : state_.list_mixer_channels()) {
+            for (const auto& m : engine_.list_mixer_channels()) {
                 arr.push_back(json{
                     {"id",           m.id.value},
                     {"display_name", m.display_name},
@@ -1576,6 +1581,8 @@ void ControlServer::install_routes() {
             try {
                 auto j = json::parse(req.body);
                 const auto id = engine_.create_mixer_channel(j.value("name", "Channel"));
+                if (id.empty())
+                    return json_err(507, "mixer channel limit reached");
                 return json_ok(json({{"id", id.value}}));
             } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
@@ -1587,6 +1594,30 @@ void ControlServer::install_routes() {
                 return json_err(404, "not found");
             engine_.remove_mixer_channel(audio::MixerChannelId{id});
             return json_ok(json({{"ok", true}}));
+        });
+
+    // Strip level / mute. GET /api/mixers has always reported these, but until
+    // now nothing could set them over the API — only server-internal code could.
+    CROW_ROUTE(app, "/api/mixers/<string>/gain").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req, std::string id){
+            try {
+                auto* m = engine_.find_mixer_channel(audio::MixerChannelId{id});
+                if (!m) return json_err(404, "not found");
+                auto j = json::parse(req.body);
+                m->set_gain_db(j.value("db", 0.0f));
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/mixers/<string>/mute").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req, std::string id){
+            try {
+                auto* m = engine_.find_mixer_channel(audio::MixerChannelId{id});
+                if (!m) return json_err(404, "not found");
+                auto j = json::parse(req.body);
+                m->set_mute(j.value("muted", false));
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 
     // ---- Routing ----

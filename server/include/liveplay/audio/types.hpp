@@ -36,6 +36,11 @@ inline constexpr float        kDefaultMasterCeilingDb = -0.3f;
 inline constexpr ChannelCount kReservedPreviewChannels = 2;
 inline constexpr ChannelCount kMinMasterChannels       = 4;
 
+// Hard ceiling on simultaneous mixer strips ("buses"). The render thread's
+// per-lane accumulators are sized for this once at start() so it never has to
+// allocate mid-block; creating a strip beyond the cap is refused instead.
+inline constexpr std::uint32_t kDefaultMaxMixerChannels = 64;
+
 // Mixer strips carry this many parallel audio lanes (stereo: L=0, R=1).
 // Item→mixer and mixer→master sends address a specific lane; kAllMixerLanes
 // fans the send across every lane — used for mono sources (centre image) and

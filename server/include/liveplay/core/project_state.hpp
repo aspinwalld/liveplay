@@ -476,9 +476,13 @@ private:
     };
     std::unordered_map<std::string, DeviceRouting> device_routings_;
     // Next free master channel pair when allocating new device routings.
-    // Default device occupies 0/1; preview occupies 30/31; overrides start
-    // at 2 and increment by 2.
-    audio::MasterChannelIndex next_override_master_ = 2;
+    // Default device occupies 0/1; preview occupies the top pair of the bus
+    // (see audio::preview_master_base); overrides start here and step by 2.
+    static constexpr audio::MasterChannelIndex kFirstOverrideMaster = 2;
+    audio::MasterChannelIndex next_override_master_ = kFirstOverrideMaster;
+
+    // Unwire and forget every per-device override routing. Caller holds mutex_.
+    void release_device_routings_locked();
 
     // Preview state. The preview infrastructure is opened lazily on first
     // preview request, then re-used (cheaper than reopening the audio

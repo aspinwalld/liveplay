@@ -1005,6 +1005,7 @@ void ProjectState::reset() {
     mixer_routes_.clear();
     master_assignments_.clear();
     item_uuid_to_cue_.clear();
+    release_device_routings_locked();
     // The selection and the trigger-order stamps belong to the project that is
     // going away; carrying them into the next one would leave control surfaces
     // pointing at uuids that no longer exist. Show Mode and the locale are
@@ -3324,15 +3325,27 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
         return {};
     }
 
-    audio::MasterChannelIndex master_l;
-    audio::MasterChannelIndex master_r;
+    // Create the strip before reserving the master pair. A refused strip then
+    // costs nothing to unwind, whereas reserving first would strand the pair —
+    // next_override_master_ only ever moves upward within a project.
+    const auto mixer = engine_.create_mixer_channel(
+        "Output: " + device_name);
+    if (mixer.empty()) {
+        Logger::error("ensure_device_routing: no mixer strip available for '{}'; "
+                      "item will use default routing", device_name);
+        return {};
+    }
+
+    audio::MasterChannelIndex master_l = 0;
+    audio::MasterChannelIndex master_r = 0;
+    bool exhausted = false;
     {
         std::lock_guard lock{mutex_};
         // Bound-check master allocation. Each distinct device override consumes
         // a pair of master channels growing upward from next_override_master_,
         // while the top two channels of the bus are reserved for preview.
         // Never allocate into or past that reserve — doing so would collide with
-        // preview output or run past the engine's master bus width. 
+        // preview output or run past the engine's master bus width.
         const audio::MasterChannelIndex bus_width =
             engine_.config().master_channels;
         const audio::MasterChannelIndex reserved_base =
@@ -3343,15 +3356,18 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
                 "(next={}, reserved_base={}, bus_width={}); item will use "
                 "default routing instead of a dedicated device master",
                 device_name, next_override_master_, reserved_base, bus_width);
-            return {};
+            exhausted = true;
+        } else {
+            master_l = next_override_master_;
+            master_r = next_override_master_ + 1;
+            next_override_master_ += 2;
         }
-        master_l = next_override_master_;
-        master_r = next_override_master_ + 1;
-        next_override_master_ += 2;
+    }
+    if (exhausted) {
+        engine_.remove_mixer_channel(mixer);   // engine takes its own lock
+        return {};
     }
 
-    const auto mixer = engine_.create_mixer_channel(
-        "Output: " + device_name);
     engine_.assign_master_to_device(master_l, dev, 0);
     engine_.assign_master_to_device(master_r, dev, 1);
     engine_.route_mixer_to_master(mixer, master_l, 0.0f, 0);   // strip L lane
@@ -3407,6 +3423,34 @@ void ProjectState::route_cue_to_mixer(const audio::CueId& cue,
 // (device + mixer + master assignments) is set up lazily on first preview
 // and reused for subsequent ones.
 // ---------------------------------------------------------------------------
+// Unwire every per-device override routing and release its master pair.
+//
+// These live only in device_routings_ — the engine knows about the mixer strip
+// and the master assignments, but nothing else tracks them. Dropping the map
+// alone would strand the strips and permanently consume master channels:
+// next_override_master_ only ever moves upward, so switching projects enough
+// times in one session exhausts the bus and every subsequent device override
+// silently falls back to default routing.
+//
+// Devices themselves are left open on purpose. Reopening one is the expensive
+// part (which is why preview caches its device), and the engine reuses open
+// devices by name, so nothing is gained by closing them here.
+void ProjectState::release_device_routings_locked() {
+    for (auto& [name, dr] : device_routings_) {
+        // remove_mixer_channel() also drops the strip's mixer->master sends and
+        // any item->mixer sends pointing at it, so only the master->device
+        // assignments need clearing explicitly.
+        engine_.remove_mixer_channel(dr.mixer);
+        engine_.clear_master_assignment(dr.master_l);
+        engine_.clear_master_assignment(dr.master_r);
+    }
+    if (!device_routings_.empty()) {
+        Logger::debug("released {} device-override routing(s)", device_routings_.size());
+    }
+    device_routings_.clear();
+    next_override_master_ = kFirstOverrideMaster;
+}
+
 bool ProjectState::start_preview(const std::string& item_uuid) {
     if (item_uuid.empty()) return false;
 
@@ -3498,6 +3542,10 @@ bool ProjectState::start_preview(const std::string& item_uuid) {
             const audio::MasterChannelIndex preview_r = preview_l + 1;
 
             const auto mixer = engine_.create_mixer_channel("Preview");
+            if (mixer.empty()) {
+                Logger::warn("preview: no mixer strip available");
+                return false;
+            }
             engine_.assign_master_to_device(preview_l, dev, 0);
             engine_.assign_master_to_device(preview_r, dev, 1);
             engine_.route_mixer_to_master(mixer, preview_l, 0.0f, 0);
@@ -3783,6 +3831,10 @@ bool ProjectState::load_from_json(const json& doc_in) {
             item_routes_.clear();
             mixer_routes_.clear();
             master_assignments_.clear();
+            // The outgoing project's device overrides are meaningless to the
+            // incoming one, and their master pairs are never otherwise
+            // reclaimed — see release_device_routings_locked().
+            release_device_routings_locked();
 
             document_ = std::move(doc_repaired);
             // Ensure required top-level keys exist (migrate older client saves).

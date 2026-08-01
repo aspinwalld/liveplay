@@ -259,6 +259,7 @@ struct CliOptions {
     std::optional<audio::SampleRate>         mix_sample_rate;
     std::optional<audio::FrameCount>         render_block;
     std::optional<audio::MasterChannelIndex> master_channels;
+    std::optional<std::uint32_t>             max_buses;
     std::optional<float>                     master_ceiling_db;
     std::optional<std::size_t>               meter_broadcast_hz;
     std::optional<std::size_t>               max_upload_bytes;
@@ -328,6 +329,9 @@ CliOptions parse_cli(int argc, char** argv) {
         opts.master_channels = parse_ranged<audio::MasterChannelIndex>(
             "LIVEPLAY_MASTER_CHANNELS", v, audio::kMinMasterChannels, 1'024);
     }
+    if (const char* v = std::getenv("LIVEPLAY_MAX_BUSES")) {
+        opts.max_buses = parse_ranged<std::uint32_t>("LIVEPLAY_MAX_BUSES", v, 2, 512);
+    }
     if (const char* v = std::getenv("LIVEPLAY_MASTER_CEILING_DB")) {
         opts.master_ceiling_db = parse_ranged_db(
             "LIVEPLAY_MASTER_CEILING_DB", v, -24.0, 0.0);
@@ -378,6 +382,10 @@ CliOptions parse_cli(int argc, char** argv) {
                 opts.master_channels = parse_ranged<audio::MasterChannelIndex>(
                     a, v, audio::kMinMasterChannels, 1'024);
             }
+        } else if (a == "--max-buses") {
+            if (const char* v = next_value()) {
+                opts.max_buses = parse_ranged<std::uint32_t>(a, v, 2, 512);
+            }
         } else if (a == "--master-ceiling-db") {
             if (const char* v = next_value()) {
                 opts.master_ceiling_db = parse_ranged_db(a, v, -24.0, 0.0);
@@ -412,6 +420,7 @@ CliOptions parse_cli(int argc, char** argv) {
                 "      --mix-sample-rate <hz>  Mix sample rate, 8000-192000 (default %u)\n"
                 "      --render-block <frames> Render block size, 32-8192 (default %llu)\n"
                 "      --master-channels <n>   Master bus width, %u-1024 (default %u)\n"
+                "      --max-buses <n>         Max simultaneous mixer strips, 2-512 (default %u)\n"
                 "      --master-ceiling-db <db>  Limiter ceiling, -24.0-0.0 (default %.1f)\n"
                 "\n"
                 "Diagnostics:\n"
@@ -428,6 +437,7 @@ CliOptions parse_cli(int argc, char** argv) {
                 eng_defaults.mix_sample_rate,
                 static_cast<unsigned long long>(eng_defaults.render_block),
                 audio::kMinMasterChannels, eng_defaults.master_channels,
+                eng_defaults.max_mixer_channels,
                 static_cast<double>(eng_defaults.master_ceiling_db));
             std::exit(0);
         }
@@ -738,6 +748,7 @@ int main(int argc, char** argv) {
     if (opts.mix_sample_rate)   engine_cfg.mix_sample_rate   = *opts.mix_sample_rate;
     if (opts.render_block)      engine_cfg.render_block      = *opts.render_block;
     if (opts.master_channels)   engine_cfg.master_channels   = *opts.master_channels;
+    if (opts.max_buses)         engine_cfg.max_mixer_channels = *opts.max_buses;
     if (opts.master_ceiling_db) engine_cfg.master_ceiling_db = *opts.master_ceiling_db;
 
     auto engine = std::make_unique<audio::AudioEngine>(engine_cfg);

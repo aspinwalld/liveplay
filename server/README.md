@@ -215,7 +215,7 @@ Every cue's audio goes through three explicit tiers, in order, on the engine's r
 
 - **Tier 1 — [`PlaybackItem`](include/liveplay/audio/playback_item.hpp)**: one instance per active cue, with its own `ma_decoder`, gain/fade state machine, optional LTC generator, and a per-source-channel meter. Loading the same `.wav` into two cart slots yields **two independent instances**; attenuating one never affects the other.
 - **Tier 2 — [`MixerChannel`](include/liveplay/audio/mixer_channel.hpp)**: a virtual strip with gain, mute, solo, and a smooth-fade ramp. Many items can route into one channel; one item's source channels can fan out to multiple channels.
-- **Tier 3 — Master output bus** ([`engine.hpp`](include/liveplay/audio/engine.hpp)): up to 64 logical master channels (configurable). Each carries a limiter + meter and is assigned to exactly one `(Device, HardwareChannelIndex)` tuple.
+- **Tier 3 — Master output bus** ([`engine.hpp`](include/liveplay/audio/engine.hpp)): 32 logical master channels by default, configurable from 4 to 1024 via `--master-channels`. Each carries a limiter + meter and is assigned to exactly one `(Device, HardwareChannelIndex)` tuple. The top two are reserved for the Preview bus.
 
 All three tiers run at a 256-frame block (~5.3 ms at 48 kHz). Meters and limiter envelopes update once per block.
 

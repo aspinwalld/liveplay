@@ -105,8 +105,13 @@ bool AudioEngine::start() {
                  cfg_.mix_sample_rate, cfg_.render_block, cfg_.master_channels,
                  cfg_.master_ceiling_db);
 
-    // Pre-allocate scratch buffers sized for the worst-case topology.
-    mixer_accumulators_.clear();
+    // Pre-allocate scratch buffers sized for the worst-case topology. Sizing
+    // for the cap here — rather than growing to fit the live mixer count in
+    // render_one_block() — is what keeps the render thread allocation-free:
+    // create_mixer_channel() refuses to exceed max_mixer_channels, so these can
+    // never come up short mid-block.
+    mixer_accumulators_.assign(static_cast<std::size_t>(cfg_.max_mixer_channels) * kMixerLanes,
+                               std::vector<Sample>(cfg_.render_block, 0.0f));
     master_accumulators_.assign(cfg_.master_channels,
                                 std::vector<Sample>(cfg_.render_block, 0.0f));
 
@@ -584,6 +589,12 @@ void AudioEngine::ensure_default_routing() {
     }
     if (main_mixer.empty()) {
         main_mixer = create_mixer_channel("Main");
+        if (main_mixer.empty()) {
+            Logger::error("ensure_default_routing: cannot create the Main mixer — "
+                          "at the {} strip limit; no default routing is possible",
+                          cfg_.max_mixer_channels);
+            return;
+        }
         Logger::info("ensure_default_routing: created Main mixer '{}'", main_mixer.value);
     }
 
@@ -662,12 +673,36 @@ MixerChannelId AudioEngine::create_mixer_channel(std::string display_name) {
     auto ch = std::make_shared<MixerChannel>(id, std::move(display_name));
     ch->configure(cfg_.mix_sample_rate, cfg_.render_block);
     std::lock_guard lock{mutex_};
+    // The render thread's lane accumulators are sized for max_mixer_channels at
+    // start() and never grown, so this cap is what keeps that promise. Refuse
+    // rather than allocate mid-block.
+    if (mixers_.size() >= cfg_.max_mixer_channels) {
+        Logger::error("create_mixer_channel: at the {} strip limit, refusing '{}'",
+                      cfg_.max_mixer_channels, ch->display_name());
+        return MixerChannelId{};
+    }
     ch->configure_meters(meter_ballistics_);        // inherit project settings
     ch->set_true_peak_enabled(meter_true_peak_);
     ch->set_loudness_enabled(meter_loudness_);
     mixers_[id.value] = ch;
     rebuild_topology_locked();
     return id;
+}
+
+std::vector<AudioEngine::MixerChannelInfo> AudioEngine::list_mixer_channels() const {
+    std::vector<MixerChannelInfo> out;
+    std::lock_guard lock{mutex_};
+    out.reserve(mixers_.size());
+    for (const auto& [_, m] : mixers_) {
+        out.push_back(MixerChannelInfo{
+            m->id(),
+            m->display_name(),
+            linear_to_db_precise(m->peek_gain_linear()),
+            m->is_muted(),
+            m->is_soloed(),
+        });
+    }
+    return out;
 }
 
 void AudioEngine::remove_mixer_channel(const MixerChannelId& id) {
@@ -1003,9 +1038,16 @@ void AudioEngine::render_one_block(const Topology& topo) {
     // One accumulator per mixer *lane* (stereo strips: L and R stay separate
     // all the way to the masters).
     const std::size_t lane_buf_count = active_mixers.size() * kMixerLanes;
-    if (mixer_accumulators_.size() < lane_buf_count) {
-        mixer_accumulators_.resize(lane_buf_count,
-                                   std::vector<Sample>(block, 0.0f));
+    if (lane_buf_count > mixer_accumulators_.size()) {
+        // Should be unreachable: create_mixer_channel() enforces the cap. Drop
+        // the overflow rather than allocating on the render thread.
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true, std::memory_order_relaxed)) {
+            Logger::error("render: {} mixer lanes exceeds the preallocated {} — "
+                          "extra strips will be silent",
+                          lane_buf_count, mixer_accumulators_.size());
+        }
+        active_mixers.resize(mixer_accumulators_.size() / kMixerLanes);
     }
     for (auto& mb : mixer_accumulators_) {
         if (mb.size() < block) mb.assign(block, 0.0f);

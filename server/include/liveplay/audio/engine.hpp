@@ -121,6 +121,7 @@ struct EngineConfig {
     FrameCount         render_block       = kDefaultRenderBlock;
     MasterChannelIndex master_channels    = kDefaultMasterChannels;  // logical bus width
     float              master_ceiling_db  = kDefaultMasterCeilingDb;
+    std::uint32_t      max_mixer_channels = kDefaultMaxMixerChannels;
 };
 
 // ---------------------------------------------------------------------------
@@ -238,6 +239,17 @@ public:
     MixerChannelId create_mixer_channel(std::string display_name);
     void remove_mixer_channel(const MixerChannelId& id);
     MixerChannel* find_mixer_channel(const MixerChannelId& id) const;
+
+    // Snapshot of every live strip, for API/UI enumeration. Taken under the
+    // engine lock and returned by value so callers never touch the registry.
+    struct MixerChannelInfo {
+        MixerChannelId id;
+        std::string    display_name;
+        float          gain_db;
+        bool           muted;
+        bool           soloed;
+    };
+    std::vector<MixerChannelInfo> list_mixer_channels() const;
 
     // ---- Routing matrix --------------------------------------------------
     // `lane` selects which mixer strip lane the source channel feeds
