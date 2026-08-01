@@ -52,6 +52,26 @@
       </button>
     </div>
 
+    <!-- Pan. Only a mono bus has one: pan is the position of a single lane
+         between the two lanes of a stereo destination, which is what a mono
+         channel's pot does. A stereo bus would want balance, which isn't
+         built — the knob stays visible but disabled so strips keep the same
+         height and their meters stay aligned across the rail. -->
+    <div class="strip__pan" @click.stop>
+      <Knob
+        :value="pan"
+        :min="-1"
+        :max="1"
+        :origin="0"
+        :size="touch ? 40 : 30"
+        :disabled="bus.width >= 2"
+        :title="bus.width >= 2 ? t('mixer.balanceUnsupported') : t('mixer.pan')"
+        @input="onPan"
+        @reset="onPan(0)"
+      />
+      <span class="strip__panlabel">{{ panLabel }}</span>
+    </div>
+
     <!-- Mute / PFL -->
     <div class="strip__row strip__row--split">
       <button
@@ -126,6 +146,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
+import Knob from './Knob.vue';
 import LiveMeterBar from './LiveMeterBar.vue';
 import MeterScale from './MeterScale.vue';
 import {
@@ -177,7 +198,41 @@ function onFader(db: number) {
   }, 250);
 }
 
-onBeforeUnmount(() => { if (settle) clearTimeout(settle); });
+// Pan follows the fader's pattern for the same reason: the engine gets the
+// position immediately over a strip-only call, and the bus is persisted once
+// the gesture settles. Unlike gain, pan lives in the bus's send gains rather
+// than on the strip, so the live call is /api/buses/<id>/pan.
+const pan       = ref(props.bus.pan ?? 0);
+let   panHold   = false;
+let   panSettle: ReturnType<typeof setTimeout> | null = null;
+
+watch(() => props.bus.pan, v => { if (!panHold) pan.value = v ?? 0; });
+
+function onPan(v: number) {
+  if (props.bus.width >= 2) return;
+  pan.value = v;
+  panHold = true;
+  void server.setBusPan(props.bus.id, v).catch(() => {});
+  if (panSettle) clearTimeout(panSettle);
+  panSettle = setTimeout(() => {
+    panSettle = null;
+    panHold   = false;
+    emit('patch', props.bus.id, { pan: pan.value });
+  }, 250);
+}
+
+// L/R offset in the usual console notation: C at centre, L50/R50 halfway.
+const panLabel = computed(() => {
+  if (props.bus.width >= 2) return '--';
+  const v = Math.round(pan.value * 100);
+  if (v === 0) return 'C';
+  return (v < 0 ? 'L' : 'R') + Math.abs(v);
+});
+
+onBeforeUnmount(() => {
+  if (settle) clearTimeout(settle);
+  if (panSettle) clearTimeout(panSettle);
+});
 
 const renaming  = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
@@ -300,6 +355,19 @@ function onOutputChange(e: Event) {
 }
 .strip__btn--pfl { background: var(--color-success); border-color: var(--color-success); color: #fff; }
 .strip__btn:disabled, .strip__width:disabled { cursor: not-allowed; opacity: 0.4; }
+
+.strip__pan {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.strip__panlabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  min-width: 26px;
+  color: var(--color-text-secondary);
+}
 
 .strip__meterfader {
   display: flex;

@@ -92,6 +92,11 @@ struct BusDef {
     int           width      = 2;       // 1 = mono, 2 = stereo. See §2.5.
     float         gain_db    = 0.0f;
     bool          muted      = false;
+    // Position of a MONO bus between the two lanes of a stereo destination:
+    // -1 hard left, 0 centre, +1 hard right. Ignored when width == 2 — see
+    // §2.5.3: pan belongs to a mono->stereo send, not to a strip, and a
+    // stereo bus wants balance, which is deferred.
+    float         pan        = 0.0f;
     BusOutputKind output_kind = BusOutputKind::Master;
     std::string   output_target;        // bus id, or logical output name
     // System buses (Main, Monitor) are created implicitly and cannot be
@@ -443,6 +448,12 @@ public:
     // Main by having their busId cleared.
     bool delete_bus(const std::string& id);
 
+    // Live pan, for the duration of a drag: moves the send gains without
+    // writing the document or broadcasting, the way the strip-level gain and
+    // mute endpoints do. The client persists the final value with patch_bus
+    // when the gesture settles.
+    bool set_bus_pan_live(const std::string& id, float pan);
+
     std::filesystem::path media_root() const;
     void set_media_root(std::filesystem::path p);
 
@@ -584,6 +595,11 @@ private:
     // Connect a materialised strip to wherever its bus says it goes, reserving
     // a master pair if the destination needs one. Caller must NOT hold mutex_.
     void wire_bus(const BusDef& bus, BusRouting& routing);
+    // Re-issues just the two mixer->master sends that carry a mono bus's pan.
+    // Separate from wire_bus because panning must not tear the routing down:
+    // route_mixer_to_master replaces an existing send in place, so a pan drag
+    // never drops audio or churns the device assignment.
+    void apply_bus_pan(const BusDef& bus, const BusRouting& routing);
     // Drop every master route and assignment the bus holds and return its
     // pair to the pool. Caller must NOT hold mutex_.
     void unwire_bus(BusRouting& routing);

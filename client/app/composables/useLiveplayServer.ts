@@ -889,6 +889,16 @@ function createClient() {
     await fetchBuses();
   }
 
+  // Live pan for the duration of a knob drag. Moves the send gains in the
+  // engine only — no document write, no refetch — exactly as setMixerGainDb
+  // does for the fader. The caller PATCHes the settled value.
+  async function setBusPan(id: string, pan: number) {
+    return rest(`/api/buses/${encodeURIComponent(id)}/pan`, {
+      method: 'POST',
+      body: JSON.stringify({ pan }),
+    });
+  }
+
   async function deleteBus(id: string) {
     await rest(`/api/buses/${encodeURIComponent(id)}`, { method: 'DELETE' });
     await fetchBuses();
@@ -1203,6 +1213,7 @@ function createClient() {
     fetchBuses,
     createBus,
     patchBus,
+    setBusPan,
     deleteBus,
     setItemBus,
     fetchOutputs,

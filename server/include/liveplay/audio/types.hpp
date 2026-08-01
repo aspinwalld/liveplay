@@ -7,7 +7,9 @@
 // ============================================================================
 #pragma once
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <ostream>
@@ -46,6 +48,33 @@ inline constexpr std::uint32_t kDefaultMaxMixerChannels = 64;
 // two stay consistent. Referenced by symbol everywhere rather than written as
 // a literal, because this is intended to become a server config value.
 inline constexpr float kDefaultDownmixDb = -3.0f;
+
+// Anything below this is inaudible; used as the floor for a hard-panned
+// send so 20*log10(0) never reaches the engine as -inf.
+inline constexpr float kSilentGainDb = -120.0f;
+
+// Constant-power pan of a mono source across two lanes of a stereo
+// destination. `pan` is -1 (hard left) .. 0 (centre) .. +1 (hard right).
+//
+// The two returned gains satisfy l^2 + r^2 = 1, so the perceived level holds
+// steady as the source sweeps across the image. At centre both come out at
+// -3.01 dB, which is kDefaultDownmixDb to within a hundredth of a dB: a
+// centred mono source and a stereo fold-down land at the same level, which is
+// the consistency §2.5.2/§2.5.3 asked for. Hard over, the live side is exactly
+// unity — panning never adds gain.
+struct PanGainsDb { float left; float right; };
+
+inline PanGainsDb pan_gains_db(float pan) noexcept {
+    const float p     = std::clamp(pan, -1.0f, 1.0f);
+    const float theta = (p + 1.0f) * 0.25f * 3.14159265358979323846f;  // 0 .. pi/2
+    const float l     = std::cos(theta);
+    const float r     = std::sin(theta);
+    const auto to_db  = [](float g) {
+        return g <= 0.0f ? kSilentGainDb
+                         : std::max(kSilentGainDb, 20.0f * std::log10(g));
+    };
+    return {to_db(l), to_db(r)};
+}
 
 // Mixer strips carry this many parallel audio lanes (stereo: L=0, R=1).
 // Item→mixer and mixer→master sends address a specific lane; kAllMixerLanes

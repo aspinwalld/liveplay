@@ -128,6 +128,48 @@ void test_zero_length_fade() {
     check_near("zero fade: stable after advance", m.peek_gain_linear(), 0.0, 1e-6);
 }
 
+// ---------------------------------------------------------------------------
+// Constant-power pan law (pan_gains_db). Two properties carry real weight and
+// are easy to break silently:
+//
+//   * Constant power. l^2 + r^2 == 1 everywhere, so a source sweeping across
+//     the image holds its perceived level instead of dipping in the middle.
+//   * Centre agrees with the downmix constant. A centred mono source and a
+//     stereo fold-down must land at the same level, which is the whole reason
+//     kDefaultDownmixDb and this law are described as one law in the design.
+//     If someone "rounds" one of them, this catches it.
+void test_pan_law() {
+    const auto lin = [](float db) { return std::pow(10.0, db / 20.0); };
+
+    const auto centre = pan_gains_db(0.0f);
+    check_near("pan: centre is symmetric",
+               centre.left - centre.right, 0.0, 1e-6);
+    check_near("pan: centre matches the downmix constant",
+               centre.left, kDefaultDownmixDb, 0.02);
+
+    const auto left = pan_gains_db(-1.0f);
+    check_near("pan: hard left is unity on L", left.left, 0.0, 1e-4);
+    check_true ("pan: hard left is silent on R", left.right <= kSilentGainDb + 1e-3f);
+
+    const auto right = pan_gains_db(1.0f);
+    check_near("pan: hard right is unity on R", right.right, 0.0, 1e-4);
+    check_true ("pan: hard right is silent on L", right.left <= kSilentGainDb + 1e-3f);
+
+    // Power stays constant across the sweep, which is what stops the image
+    // from dipping as it crosses centre.
+    double worst = 0.0;
+    for (int i = -10; i <= 10; ++i) {
+        const auto g = pan_gains_db(static_cast<float>(i) / 10.0f);
+        const double power = lin(g.left) * lin(g.left) + lin(g.right) * lin(g.right);
+        worst = std::max(worst, std::fabs(power - 1.0));
+    }
+    check_near("pan: constant power across the sweep", worst, 0.0, 1e-6);
+
+    // Out-of-range input must clamp, not wrap into the far side of the arc.
+    check_near("pan: clamps below -1", pan_gains_db(-4.0f).left, 0.0, 1e-4);
+    check_near("pan: clamps above +1", pan_gains_db(4.0f).right, 0.0, 1e-4);
+}
+
 } // namespace
 
 int main() {
@@ -137,6 +179,7 @@ int main() {
     test_advance_completes_on_schedule();
     test_begin_fade_does_not_consume_a_block();
     test_zero_length_fade();
+    test_pan_law();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES",
                 g_failures, g_failures == 1 ? "" : "s");

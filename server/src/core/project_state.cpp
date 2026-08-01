@@ -3527,6 +3527,7 @@ void ProjectState::load_buses_locked() {
             d.width        = std::clamp(b.value("width", 2), 1, 2);
             d.gain_db      = b.value("gainDb", 0.0f);
             d.muted        = b.value("mute", false);
+            d.pan          = std::clamp(b.value("pan", 0.0f), -1.0f, 1.0f);
             if (b.contains("output") && b["output"].is_object()) {
                 const auto& out = b["output"];
                 const auto kind = out.value("type", std::string{"master"});
@@ -3661,6 +3662,7 @@ void ProjectState::write_buses_to_document_locked() {
             {"width",  b.width},
             {"gainDb", b.gain_db},
             {"mute",   b.muted},
+            {"pan",    b.pan},
             {"output", json{{"type", kind}, {"target", b.output_target}}},
         });
     }
@@ -3708,6 +3710,45 @@ void ProjectState::unwire_bus(BusRouting& routing) {
     }
 }
 
+bool ProjectState::set_bus_pan_live(const std::string& id, float pan) {
+    BusDef     def;
+    BusRouting routing;
+    {
+        std::lock_guard lock{mutex_};
+        const auto bit = std::find_if(buses_.begin(), buses_.end(),
+                                      [&](const BusDef& b) { return b.id == id; });
+        if (bit == buses_.end()) return false;
+        def = *bit;
+        const auto rit = bus_routings_.find(id);
+        if (rit == bus_routings_.end()) return false;
+        routing = rit->second;
+    }
+    // Deliberately not written back to buses_: this is the in-gesture value.
+    // patch_bus persists it on settle and will re-apply the same gains.
+    def.pan = std::clamp(pan, -1.0f, 1.0f);
+    apply_bus_pan(def, routing);
+    return true;
+}
+
+void ProjectState::apply_bus_pan(const BusDef& bus, const BusRouting& routing) {
+    // Pan is a property of a mono->stereo send (§2.5.3). A stereo bus has no
+    // pan — balance is deferred — and a mono destination has nowhere to pan to.
+    if (routing.mixer.empty() || bus.width >= 2) return;
+
+    const auto g = audio::pan_gains_db(bus.pan);
+
+    if (bus.output_kind == BusOutputKind::Master) {
+        engine_.route_mixer_to_master(routing.mixer, 0, g.left,  0);
+        engine_.route_mixer_to_master(routing.mixer, 1, g.right, 0);
+        return;
+    }
+    if (bus.output_kind != BusOutputKind::Output || !routing.has_masters) return;
+    if (outputs_.resolve(bus.output_target).size() < 2) return;
+
+    engine_.route_mixer_to_master(routing.mixer, routing.master_l, g.left,  0);
+    engine_.route_mixer_to_master(routing.mixer, routing.master_r, g.right, 0);
+}
+
 void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
     if (routing.mixer.empty()) return;
 
@@ -3716,10 +3757,10 @@ void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
             engine_.route_mixer_to_master(routing.mixer, 0, 0.0f, 0);   // L
             engine_.route_mixer_to_master(routing.mixer, 1, 0.0f, 1);   // R
         } else {
-            // Mono bus centred into the stereo master at the pan law, so a
-            // centred mono source and a stereo fold-down agree.
-            engine_.route_mixer_to_master(routing.mixer, 0, audio::kDefaultDownmixDb, 0);
-            engine_.route_mixer_to_master(routing.mixer, 1, audio::kDefaultDownmixDb, 0);
+            // Mono bus placed in the stereo master by the pan law. At pan 0
+            // both gains are -3 dB, so a centred mono source and a stereo
+            // fold-down agree.
+            apply_bus_pan(bus, routing);
         }
         return;
     }
@@ -3773,11 +3814,8 @@ void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
         engine_.route_mixer_to_master(routing.mixer, routing.master_l,
                                       audio::kDefaultDownmixDb, 1);
     } else if (used >= 2) {
-        // Mono bus centred across a stereo output.
-        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
-                                      audio::kDefaultDownmixDb, 0);
-        engine_.route_mixer_to_master(routing.mixer, routing.master_r,
-                                      audio::kDefaultDownmixDb, 0);
+        // Mono bus placed across a stereo output by the same pan law.
+        apply_bus_pan(bus, routing);
     } else {
         engine_.route_mixer_to_master(routing.mixer, routing.master_l, 0.0f, 0);
     }
@@ -3845,6 +3883,7 @@ std::optional<BusDef> ProjectState::create_bus(const json& spec) {
     d.width        = std::clamp(spec.value("width", 2), 1, 2);
     d.gain_db      = spec.value("gainDb", 0.0f);
     d.muted        = spec.value("mute", false);
+    d.pan          = std::clamp(spec.value("pan", 0.0f), -1.0f, 1.0f);
     if (spec.contains("output") && spec["output"].is_object()) {
         const auto& out  = spec["output"];
         const auto  kind = out.value("type", std::string{"master"});
@@ -3904,6 +3943,7 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
     BusRouting routing;
     bool       found       = false;
     bool       needs_rewire = false;
+    bool       pan_moved    = false;
     {
         std::lock_guard lock{mutex_};
         for (auto& b : buses_) {
@@ -3917,6 +3957,10 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
             if (patch.contains("width")) {
                 const int w = std::clamp(patch.value("width", b.width), 1, 2);
                 if (w != b.width) { b.width = w; needs_rewire = true; }
+            }
+            if (patch.contains("pan")) {
+                const float p = std::clamp(patch.value("pan", b.pan), -1.0f, 1.0f);
+                if (p != b.pan) { b.pan = p; pan_moved = true; }
             }
             if (patch.contains("output") && patch["output"].is_object()) {
                 const auto& out  = patch["output"];
@@ -3954,6 +3998,9 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
             wire_bus(updated, routing);
             std::lock_guard lock{mutex_};
             bus_routings_[id] = routing;
+        } else if (pan_moved) {
+            // Send gains only — a pan drag must not tear the routing down.
+            apply_bus_pan(updated, routing);
         }
     }
     return true;

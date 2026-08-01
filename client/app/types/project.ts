@@ -168,6 +168,13 @@ export interface Bus {
   width: number;
   gainDb: number;
   mute: boolean;
+  /**
+   * Position of a MONO bus between the two lanes of a stereo destination:
+   * -1 hard left, 0 centre, +1 hard right. Ignored when width is 2 — pan
+   * belongs to a mono->stereo send, and a stereo bus wants balance, which
+   * is not built.
+   */
+  pan: number;
   /** Main and Monitor: always present, cannot be deleted. */
   system: boolean;
   output: BusOutput;

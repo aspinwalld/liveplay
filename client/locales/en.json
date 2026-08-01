@@ -563,6 +563,8 @@
     "mute": "MUTE",
     "pfl": "PFL",
     "width": "Width",
+    "pan": "Pan",
+    "balanceUnsupported": "Only mono buses have a pan; balance for stereo buses is not implemented yet",
     "mono": "Mono",
     "stereo": "Stereo",
     "output": "Output",

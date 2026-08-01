@@ -27,8 +27,8 @@ a bus's lifetime and returned to a free list on delete or rewire.
 
 **Stage 2 — mixer.** `MixerPanel` / `MixerStrip` / `MixerChannelDetails`, docking as a resizable
 side pane, taking the full workspace, or popping out into its own Electron window
-(`?mixerWindow=1`). Per-lane meters. The legacy `RoutingMatrixPanel` and the per-item
-device-override control are deleted.
+(`?mixerWindow=1`). Per-lane meters. `Knob.vue` and pan on mono buses. The legacy
+`RoutingMatrixPanel` and the per-item device-override control are deleted.
 
 ### 0.2 Decisions taken during implementation
 
@@ -46,11 +46,16 @@ device-override control are deleted.
 | **`LiveMeterBar` reads output-target zone levels** instead of hardcoded −40/−18/−9. | It disagreed with `StereoMeter` about where "hot" starts on every target except the default. |
 | **The detached mixer window still takes the cart window's project-data IPC**, despite needing no document to function. | Meter zone colours come from `settings.outputTargetLevels`, and theme/accent from `theme` — without them the popped-out meters would colour off the EBU defaults and disagree with the same meter in the main window. Buses, meters and fader moves do go over that window's own WebSocket. |
 | **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
+| **Pan moves the two mixer→master send gains in place; it never rewires.** `POST /api/buses/<id>/pan` is live-only, `PATCH` persists on settle. | `route_mixer_to_master` replaces an existing send, so a pan drag drops no audio. Going through `unwire_bus`/`wire_bus` would release and re-acquire the master pair and re-open the device on every drag event. |
+| **A stereo bus shows its pan knob disabled** rather than hiding it. | Strips must stay the same height or the meters stop lining up across the rail. Balance is still deferred (§2.5.3). |
 
 ### 0.3 Not done
 
-- **`Knob.vue`** — still the one component that must be built from scratch; needed for pan and all
-  of Stage 5. §8.2
+- **An output-map edit does not re-wire live buses.** `PUT /api/outputs` saves and persists the
+  map, but `materialise_buses()` runs only on document load, so a bus already pointing at "FOH"
+  keeps the routing it was wired with. The operator has to reassign the bus or reload the project.
+  Confirmed by test, not yet fixed — the fix needs a decision about whether an edit may interrupt
+  audio on buses it does not affect.
 - **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
 - **Stage 4 — bus → bus.** A bus targeting another bus is accepted, warns, and stays silent.
 - **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics/Inserts tabs render disabled.
@@ -58,7 +63,10 @@ device-override control are deleted.
   problem `defaultOutputDevice` had, untouched because they are separate features.
 - **Global master gain has no UI** (see above). A true master fader distinct from output trim is a
   real thing a desk has; needs a decision.
-- **Pan** is designed (§2.5.3) but not built — it needs `Knob.vue`.
+- **Balance for stereo buses** (§2.5.3). The knob is there and disabled; pan on mono buses is
+  built.
+- **Neither `CanvasFader` nor `Knob` is keyboard-reachable.** Deliberate, so the two behave
+  identically, but it means the mixer cannot be driven without a pointer.
 
 ---
 
@@ -618,11 +626,12 @@ Stage 5 fills panels rather than inventing navigation late.
 
 **Must be built:**
 
-- **`Knob.vue`** — no rotary control exists anywhere in the app. Needed for pan now and EQ/dynamics
-  later. Build it the way `CanvasFader` is built: canvas, pointer drag, shift for fine, double-click
-  to reset, and **reading CSS custom properties at draw time** so it re-themes without a remount
-  ([CanvasFader.vue:228-241](client/app/components/CanvasFader.vue#L228-L241)). Canvas cannot inherit
-  CSS, so any new canvas control inherits that requirement.
+- ~~**`Knob.vue`**~~ — **built.** Canvas, 270-degree travel with the gap at the bottom, anchored
+  vertical drag over a fixed 140px (a knob is too small to map its own height to the range),
+  shift for fine, wheel, double-click to reset, and CSS custom properties read at draw time so it
+  re-themes without a remount. The value is a plain number in the caller's unit — nothing about dB
+  or pan is baked in, so EQ can reuse it. `origin` decides where the value arc grows from, which is
+  what makes it read as a bipolar deflection for pan and a fill for a unipolar parameter.
 - **A `width` prop on `CanvasFader`** — 20px suits a dense docked strip but is too small for a
   detached mixer window on a large display.
 - **`EqCurve.vue` / `DynamicsCurve.vue`** — the graph displays. Placeholders in Stage 2.

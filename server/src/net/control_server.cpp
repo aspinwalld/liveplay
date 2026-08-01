@@ -1608,6 +1608,7 @@ void ControlServer::install_routes() {
                         {"width",    b.def.width},
                         {"gainDb",   b.def.gain_db},
                         {"mute",     b.def.muted},
+                        {"pan",      b.def.pan},
                         {"system",   b.def.system},
                         {"output",   json{{"type", kind}, {"target", b.def.output_target}}},
                         {"mixerId",  b.mixer.value},
@@ -1640,6 +1641,21 @@ void ControlServer::install_routes() {
                     {"type", "doc_patch"}, {"op", "buses_patched"},
                     {"buses", state_.full_document().value("buses", json::array())},
                 });
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    // Live pan while the knob is being dragged: moves the send gains only.
+    // No document write, no broadcast — the client PATCHes the settled value.
+    // Same shape as the strip gain/mute endpoints, and for the same reason:
+    // a PATCH per drag event would rewrite the document and bounce the knob
+    // back to the stale value until the round-trip landed.
+    CROW_ROUTE(app, "/api/buses/<string>/pan").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req, std::string id){
+            try {
+                auto j = json::parse(req.body);
+                if (!state_.set_bus_pan_live(id, j.value("pan", 0.0f)))
+                    return json_err(404, "not found");
                 return json_ok(json({{"ok", true}}));
             } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
