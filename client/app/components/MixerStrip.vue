@@ -1,13 +1,25 @@
 <template>
   <!--
     One bus, as a channel strip. Ordered the way a desk is, top to bottom:
-    inserts, output assignment, pan, mute/PFL, then fader and meter taking the
-    dominant vertical space, with the name at the bottom where the scribble
-    strip lives.
+    inserts, output assignment, details, pan, mute/PFL, then fader and meter
+    taking the dominant vertical space, with the name at the bottom where the
+    scribble strip lives.
+
+    The master is rendered by this component too, as a strip whose gain drives
+    the output-channel pair instead of a bus. It used to be bespoke markup in
+    MixerPanel, which is why it had its own padding and spacing — and why the
+    one strip that mattered most looked unlike all the others. Every row here
+    is present on both, blank where it does not apply, because the faders only
+    line up across the rail if the rows above and below them are equal heights.
   -->
   <div
     class="strip"
-    :class="{ 'strip--selected': selected, 'strip--muted': bus.mute, 'strip--touch': touch }"
+    :class="{
+      'strip--selected': selected,
+      'strip--muted': bus.mute,
+      'strip--touch': touch,
+      'strip--master': master,
+    }"
     @click="$emit('select', bus.id)"
   >
     <!-- Inserts: scaffolding until the DSP chain exists. -->
@@ -21,9 +33,12 @@
       >—</button>
     </div>
 
-    <!-- Output assignment: the most consequential control on the strip. -->
+    <!-- Output assignment: the most consequential control on the strip.
+         The master's is fixed, so it reads as a plate rather than a picker. -->
     <div class="strip__row">
+      <div v-if="master" class="strip__output strip__output--fixed">{{ t('mixer.toHardware') }}</div>
       <select
+        v-else
         class="strip__output"
         :value="outputValue"
         :title="outputTitle"
@@ -40,15 +55,19 @@
       </select>
     </div>
 
-    <div class="strip__row strip__row--split">
+    <!-- Channel details. The mono/stereo toggle used to sit beside this, but
+         a button reading "M" next to one reading "MUTE" is a trap, and width
+         is a setup decision rather than a live one — it lives in the details
+         view now. -->
+    <div class="strip__row">
       <button
-        class="strip__width"
-        :title="t('mixer.widthToggle')"
-        :disabled="bus.system"
-        @click.stop="$emit('patch', bus.id, { width: bus.width >= 2 ? 1 : 2 })"
-      >{{ bus.width >= 2 ? 'ST' : 'M' }}</button>
-      <button class="strip__fx" :title="t('mixer.channelDetails')" @click.stop="$emit('open', bus.id)"><!-- opens details, forcing full width: the three-column layout is unusable in a docked pane -->
+        class="strip__fx"
+        :title="master ? t('mixer.comingSoon') : t('mixer.channelDetails')"
+        :disabled="master"
+        @click.stop="$emit('open', bus.id)"
+      >
         <span class="material-symbols-rounded">tune</span>
+        <span class="strip__fxlabel">{{ widthLabel }}</span>
       </button>
     </div>
 
@@ -77,6 +96,7 @@
       <button
         class="strip__btn"
         :class="{ 'strip__btn--mute': bus.mute }"
+        :disabled="master"
         @click.stop="onMute"
       >{{ t('mixer.mute') }}</button>
       <button
@@ -96,18 +116,28 @@
          both map dB to position linearly. -->
     <div class="strip__meterfader">
       <div class="strip__meters" :style="{ height: METER_TRACK_PCT + '%' }">
-        <template v-if="bus.mixerId">
-          <LiveMeterBar
-            v-for="lane in bus.width >= 2 ? [0, 1] : [null]"
-            :key="'lane' + lane"
-            source="mixer"
-            :mixer-id="bus.mixerId"
-            :lane="lane"
-            vertical
-            :min-db="FADER_MIN_DB"
-            :max-db="METER_MAX_DB"
-          />
-        </template>
+        <!-- The same meter the master uses, so zone colours, peak hold, the
+             clip latch and the project's meter mode are identical on every
+             strip. The strip supplies the frame and the shared scale, so the
+             meter renders bare and without its own tick column. -->
+        <StereoMeter
+          v-if="master"
+          :left-index="0"
+          :right-index="1"
+          bare
+          :show-scale="false"
+          :min-db="FADER_MIN_DB"
+          :max-db="METER_MAX_DB"
+        />
+        <StereoMeter
+          v-else-if="bus.mixerId"
+          :mixer-id="bus.mixerId"
+          :mono="bus.width < 2"
+          bare
+          :show-scale="false"
+          :min-db="FADER_MIN_DB"
+          :max-db="METER_MAX_DB"
+        />
         <div v-else class="strip__nometer" :title="t('mixer.noStrip')"></div>
       </div>
       <MeterScale :min-db="FADER_MIN_DB" :max-db="FADER_MAX_DB" />
@@ -121,6 +151,10 @@
       />
     </div>
 
+    <!-- What the meter reads, in the project's meter unit — the master had
+         this and the strips didn't, so the same signal appeared to read two
+         different things depending on where you looked. -->
+    <div class="strip__readout">{{ meterLabel }}</div>
     <div class="strip__gain">{{ gainLabel }}</div>
 
     <!-- Scribble strip. Double-click to rename, as on a desk. -->
@@ -138,7 +172,11 @@
       />
       <span v-else class="strip__nametext" @dblclick.stop="startRename">{{ bus.name }}</span>
     </div>
-    <div class="strip__count">{{ t('mixer.itemCount', { count: bus.itemUuids.length }) }}</div>
+    <!-- Always rendered, blank on the master: the rows below the fader have to
+         be the same height on every strip or the faders stop lining up. -->
+    <div class="strip__count">
+      {{ master ? '' : t('mixer.itemCount', { count: bus.itemUuids.length }) }}
+    </div>
   </div>
 </template>
 
@@ -147,10 +185,12 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import Knob from './Knob.vue';
-import LiveMeterBar from './LiveMeterBar.vue';
+import StereoMeter from './StereoMeter.vue';
 import MeterScale from './MeterScale.vue';
+import { useMixerMeter, useMasterMeter, lufsFromKwMs } from '~/composables/useLiveMeters';
+import { useOutputTarget } from '~/composables/useOutputTarget';
 import {
-  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
+  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT, formatMeterLabel,
 } from '~/utils/meterScale';
 
 const props = defineProps<{
@@ -161,6 +201,11 @@ const props = defineProps<{
   outputNames: string[];
   /** PFL is engine work that hasn't landed; the control is shown disabled. */
   pfl?: boolean;
+  /**
+   * Render as the master strip: meters the output pair, drives output-channel
+   * gain, and blanks the rows that only mean something for a bus.
+   */
+  master?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -188,6 +233,14 @@ watch(() => props.bus.gainDb, v => { if (!holding) gainDb.value = v; });
 
 function onFader(db: number) {
   gainDb.value = db;
+  // The master's fader is the output-channel pair, the same parameter the
+  // transport bar's Main fader drives — it has no bus to patch, and its value
+  // comes back over the output_channel_gain_changed broadcast.
+  if (props.master) {
+    void server.setOutputChannelGainDb(0, db);
+    void server.setOutputChannelGainDb(1, db);
+    return;
+  }
   holding = true;
   if (props.bus.mixerId) void server.setMixerGainDb(props.bus.mixerId, db).catch(() => {});
   if (settle) clearTimeout(settle);
@@ -209,7 +262,7 @@ let   panSettle: ReturnType<typeof setTimeout> | null = null;
 watch(() => props.bus.pan, v => { if (!panHold) pan.value = v ?? 0; });
 
 function onPan(v: number) {
-  if (props.bus.width >= 2) return;
+  if (props.master || props.bus.width >= 2) return;
   pan.value = v;
   panHold = true;
   void server.setBusPan(props.bus.id, v).catch(() => {});
@@ -238,7 +291,7 @@ const renaming  = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 
 async function startRename() {
-  if (props.bus.system) return;
+  if (props.master || props.bus.system) return;
   renaming.value = true;
   await nextTick();
   nameInput.value?.select();
@@ -253,10 +306,42 @@ function commitRename() {
 // Mute goes to the engine first so it takes effect on the click rather than
 // after the document round-trip, then persists.
 function onMute() {
+  if (props.master) return;
   const next = !props.bus.mute;
   if (props.bus.mixerId) void server.setMixerMute(props.bus.mixerId, next).catch(() => {});
   emit('patch', props.bus.id, { mute: next });
 }
+
+// Width moved to the channel details view; the strip just reports it, next to
+// the button that opens the place it can be changed.
+const widthLabel = computed(() => props.bus.width >= 2 ? 'ST' : 'MONO');
+
+// The meter's own reading, in the project's unit. Subscribes to the same
+// streams StereoMeter does — cheap, since every subscriber shares one WS frame
+// — so the number under the strip and the bars above it can't disagree.
+const { meterMode } = useOutputTarget();
+const meterL = useMixerMeter(() => props.master ? null : props.bus.mixerId, () => 0);
+const meterR = useMixerMeter(() => props.master ? null : props.bus.mixerId,
+                             () => (props.bus.width >= 2 ? 1 : 0));
+const masterL = useMasterMeter(() => props.master ? 0 : null);
+const masterR = useMasterMeter(() => props.master ? 1 : null);
+
+const meterLabel = computed(() => {
+  const l = props.master ? masterL : meterL;
+  const r = props.master ? masterR : meterR;
+  const mono = !props.master && props.bus.width < 2;
+  if (meterMode.value === 'LUFS') {
+    return formatMeterLabel(
+      mono ? lufsFromKwMs([l.kwMs.value])
+           : lufsFromKwMs([l.kwMs.value, r.kwMs.value]),
+      meterMode.value);
+  }
+  const pick = (s: typeof l) =>
+    meterMode.value === 'RMS'  ? s.rms.value
+    : meterMode.value === 'dBTP' ? s.truePeak.value
+    : s.peak.value;
+  return formatMeterLabel(mono ? pick(l) : Math.max(pick(l), pick(r)), meterMode.value);
+});
 
 const gainLabel = computed(() => {
   const v = gainDb.value;
@@ -295,8 +380,10 @@ function onOutputChange(e: Event) {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
-  /* Wider than before: two lane meters plus the shared scale plus the fader. */
-  width: 88px;
+  /* Two lane meters, the shared scale and the fader, side by side. The master
+     runs widest of all — its meter carries the gain-reduction sub-track — and
+     every strip matches it so the rail stays a uniform grid. */
+  width: 96px;
   flex: 0 0 auto;
   padding: var(--spacing-xs);
   background: var(--color-surface);
@@ -304,11 +391,22 @@ function onOutputChange(e: Event) {
   border-radius: var(--border-radius-md);
   cursor: pointer;
   transition: border-color var(--transition-fast);
+  /* Everything except the meter/fader block is fixed height; min-height:0 is
+     what lets that one block absorb the difference instead of the strip
+     overflowing its container. */
+  min-height: 0;
+  overflow: hidden;
 }
-.strip--touch { width: 132px; }
+.strip--touch { width: 140px; }
 .strip:hover { border-color: var(--color-text-disabled); }
 .strip--selected { border-color: var(--color-accent); }
 .strip--muted .strip__meterfader { opacity: 0.45; }
+/* The master is the same strip; it just sits behind a divider so the eye can
+   find it at the end of the rail. */
+.strip--master { cursor: default; }
+
+/* Every row but the fader keeps its natural height when the pane is resized. */
+.strip > *:not(.strip__meterfader) { flex: 0 0 auto; }
 
 .strip__inserts { display: flex; flex-direction: column; gap: 2px; }
 .strip__insert {
@@ -334,8 +432,14 @@ function onOutputChange(e: Event) {
   border-radius: var(--border-radius-sm);
 }
 .strip__output--warn { border-color: var(--color-warning); }
+/* The master's output is not a choice; it reads as a plate, but keeps the
+   select's box so the row is the same height on every strip. */
+.strip__output--fixed {
+  text-align: center;
+  color: var(--color-text-disabled);
+  border-style: dashed;
+}
 
-.strip__width,
 .strip__fx,
 .strip__btn {
   font-size: 10px;
@@ -346,15 +450,23 @@ function onOutputChange(e: Event) {
   border-radius: var(--border-radius-sm);
   cursor: pointer;
 }
-.strip__fx { display: flex; align-items: center; justify-content: center; }
+.strip__fx {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+}
 .strip__fx .material-symbols-rounded { font-size: 14px; }
+.strip__fx:disabled { cursor: not-allowed; opacity: 0.4; }
+.strip__fxlabel { font-family: var(--font-mono); letter-spacing: 0.04em; }
 .strip__btn--mute {
   background: var(--color-danger);
   border-color: var(--color-danger);
   color: #fff;
 }
 .strip__btn--pfl { background: var(--color-success); border-color: var(--color-success); color: #fff; }
-.strip__btn:disabled, .strip__width:disabled { cursor: not-allowed; opacity: 0.4; }
+.strip__btn:disabled { cursor: not-allowed; opacity: 0.4; }
 
 .strip__pan {
   display: flex;
@@ -376,21 +488,37 @@ function onOutputChange(e: Event) {
   /* Default stretch: the scale and fader must span the full range. Only the
      meter block is shorter, and it aligns to the bottom (below) so its
      0 dBFS top edge lands on the scale's 0 tick. */
-  flex: 1;
-  min-height: 150px;
+  /* flex-basis 0 + min-height 0: this is the one part of the strip that gives
+     way when the pane gets shorter. With a min-height it refused to shrink and
+     the strip overflowed instead, so a short mixer rendered with the fader
+     spilling past the bottom rows. A floor small enough to still be grabbable
+     is enough — below that the pane itself should scroll. */
+  flex: 1 1 0;
+  min-height: 48px;
+  /* Breathing room under the mute/PFL row: the fader reads as its own zone
+     rather than the next button in a stack. */
+  margin-top: var(--spacing-xs);
 }
 .strip__meters {
   display: flex;
   gap: 2px;
   align-self: flex-end;
+  min-height: 0;
 }
 .strip__nometer { width: 6px; height: 100%; background: var(--color-background); border-radius: 2px; }
 
+.strip__readout,
 .strip__gain {
   text-align: center;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-primary);
+}
+/* The meter's reading is secondary to the fader's, which is the one the
+   operator is setting. */
+.strip__readout {
+  font-size: 10px;
+  color: var(--color-text-secondary);
 }
 
 .strip__name {

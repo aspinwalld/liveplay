@@ -62,39 +62,12 @@
         <p v-if="userBuses.length === 0" class="mixer__empty">{{ t('mixer.empty') }}</p>
       </div>
 
-      <!-- Master, pinned right. A full strip, not just a meter: it keeps
-           StereoMeter because that already has the clip latch, peak hold and
-           gain-reduction sub-track that belong on a master. -->
+      <!-- Master, pinned right — the same component as every other strip, so
+           it has the same rows at the same heights and its fader lines up
+           with theirs. It was bespoke markup here, which is exactly why the
+           one strip that matters most looked unlike all the others. -->
       <div class="mixer__master">
-        <div class="strip__inserts">
-          <button v-for="n in 2" :key="n" class="strip__insert" :title="t('mixer.insertsComingSoon')" disabled>—</button>
-        </div>
-        <div class="mixer__masterout">{{ t('mixer.toHardware') }}</div>
-        <div class="mixer__masterbody">
-          <!-- Same geometry as the channel strips: the meter is dBFS and tops
-               out at 0, so its track covers only that part of the fader's
-               range and 0 dBFS lands on the shared scale's 0 tick. -->
-          <div class="mixer__mastermeter" :style="{ height: METER_TRACK_PCT + '%' }">
-            <StereoMeter
-              :left-index="0"
-              :right-index="1"
-              :min-db="FADER_MIN_DB"
-              :max-db="METER_MAX_DB"
-              :show-peak-value="true"
-            />
-          </div>
-          <MeterScale :min-db="FADER_MIN_DB" :max-db="FADER_MAX_DB" />
-          <CanvasFader
-            :db="masterGainDb"
-            :min-db="FADER_MIN_DB"
-            :max-db="FADER_MAX_DB"
-            :width="touch ? 32 : 24"
-            @input="onMasterGain"
-            @reset="onMasterGain(0)"
-          />
-        </div>
-        <div class="mixer__mastergain">{{ masterGainLabel }}</div>
-        <div class="mixer__masterlabel">{{ t('mixer.master') }}</div>
+        <MixerStrip :bus="masterBus" :touch="touch" :output-names="[]" master />
       </div>
     </div>
 
@@ -119,12 +92,6 @@ import { computed, onMounted, ref } from 'vue';
 import type { Bus } from '~/types/project';
 import MixerStrip from './MixerStrip.vue';
 import MixerChannelDetails from './MixerChannelDetails.vue';
-import StereoMeter from './StereoMeter.vue';
-import CanvasFader from './CanvasFader.vue';
-import MeterScale from './MeterScale.vue';
-import {
-  FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,
-} from '~/utils/meterScale';
 
 const props = withDefaults(
   defineProps<{ mode?: 'side' | 'full'; detached?: boolean }>(),
@@ -172,6 +139,25 @@ const outputNames = ref<string[]>([]);
 // directions and across clients.
 const masterGainDb = computed(() => server.outputChannelGains[0] ?? 0);
 
+// The master presented as a bus, so it can go through MixerStrip. Nothing on
+// the server backs this — MixerStrip reads `master` and takes the output-pair
+// path for the fader and the meter — but shaping it as a Bus keeps one strip
+// component instead of two that drift apart.
+const masterBus = computed<Bus>(() => ({
+  id: '__master__',
+  name: t('mixer.master'),
+  color: '',
+  order: Number.MAX_SAFE_INTEGER,
+  width: 2,
+  gainDb: masterGainDb.value,
+  mute: false,
+  pan: 0,
+  system: true,
+  output: { type: 'output', target: '' },
+  mixerId: '',
+  itemUuids: [],
+}));
+
 const buses = computed<Bus[]>(() => server.buses ?? []);
 
 // Only user buses get a strip. Main is where unassigned cues already land and
@@ -187,9 +173,6 @@ const buses = computed<Bus[]>(() => server.buses ?? []);
 // was remounted — which is why expanding or undocking appeared to "fix" it.
 const userBuses = computed(() => buses.value.filter(b => !b.system));
 
-const masterGainLabel = computed(() =>
-  masterGainDb.value <= -60 ? '-∞'
-    : (masterGainDb.value > 0 ? '+' : '') + Number(masterGainDb.value).toFixed(1));
 const selectedBus = computed(() => buses.value.find(b => b.id === selectedId.value) ?? null);
 
 onMounted(async () => {
@@ -210,11 +193,6 @@ async function onDelete(id: string) {
 async function addBus() {
   const id = await server.createBus({ name: t('mixer.newBusName'), width: 2 });
   selectedId.value = id;
-}
-function onMasterGain(db: number) {
-  // Both channels of the pair move together, matching the transport bar.
-  void server.setOutputChannelGainDb(0, db);
-  void server.setOutputChannelGainDb(1, db);
 }
 </script>
 
@@ -265,6 +243,9 @@ function onMasterGain(db: number) {
      refuses to shrink below its content and the strips squash instead. */
   flex: 1;
   min-width: 0;
+  /* min-height:0 completes the chain that lets a strip's fader shrink with the
+     pane instead of the strips overflowing. */
+  min-height: 0;
   overflow-x: auto;
   align-items: stretch;
 }
@@ -274,51 +255,14 @@ function onMasterGain(db: number) {
   font-size: 12px;
 }
 
+/* The master is just a strip in a divider; the padding matches .mixer__strips
+   so its rows sit at exactly the same heights as the channels'. */
 .mixer__master {
   display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
   flex: 0 0 auto;
+  min-height: 0;
   padding: var(--spacing-sm);
   border-left: 1px solid var(--color-border);
   background: var(--color-surface);
-}
-.mixer__masterbody { display: flex; gap: 3px; flex: 1; min-height: 150px; justify-content: center; }
-.mixer__mastermeter { display: flex; align-self: flex-end; }
-.mixer__masterout {
-  text-align: center;
-  font-size: 10px;
-  padding: 2px;
-  color: var(--color-text-disabled);
-  background: var(--color-background);
-  border: 1px solid var(--color-border);
-  border-radius: var(--border-radius-sm);
-}
-.mixer__mastergain {
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-text-primary);
-}
-.mixer__masterlabel {
-  text-align: center;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  padding: 3px;
-  background: var(--color-background);
-  border-radius: var(--border-radius-sm);
-  color: var(--color-text-secondary);
-}
-
-/* Shared with MixerStrip so the master's insert slots match the channels'. */
-.strip__inserts { display: flex; flex-direction: column; gap: 2px; }
-.strip__insert {
-  height: 16px;
-  font-size: 10px;
-  color: var(--color-text-disabled);
-  background: var(--color-background);
-  border: 1px solid var(--color-border);
-  border-radius: var(--border-radius-sm);
-  cursor: not-allowed;
 }
 </style>

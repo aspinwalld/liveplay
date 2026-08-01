@@ -177,7 +177,7 @@ The component tree is intentionally flat — every SFC lives directly in [`compo
 - `WaveformCanvas.vue` — canvas-rendered waveform fetched from `GET /api/waveform/<cueId>`.
 - `WaveformTrimmer.vue` — interactive in/out trimming + normalise.
 - `MixerPanel.vue`, `MixerStrip.vue`, `MixerChannelDetails.vue` — the mixer: one channel strip per bus, with a per-bus detail view. Docks as a side pane, takes the full workspace, or pops out into its own window (`?mixerWindow=1`).
-- `LiveMeterBar.vue`, `StereoMeter.vue`, `VUMeter.vue` — meter widgets driven by `useLiveMeters`.
+- `StereoMeter.vue`, `VUMeter.vue` — meter widgets driven by `useLiveMeters`. `StereoMeter` covers every source (cue, mixer strip, master pair) so zone colours, peak hold, the clip latch and the project's meter mode are identical wherever a level is shown.
 - `ServerSettingsModal.vue`, `LocalServerStatus.vue`, `ConnectionLostModal.vue` — server connection management.
 - `ServerFileBrowser.vue`, `ServerFilePickerModal.vue` — `GET /api/fs/list` browser, used when the client and server live on different machines.
 - `AudioImportModal.vue`, `YouTubeImportModal.vue` — media import surfaces.

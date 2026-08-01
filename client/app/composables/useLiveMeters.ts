@@ -70,25 +70,45 @@ export function useMixerMeter(mixerId: () => MixerChannelId | null | undefined,
   const peak    = ref(SILENT.peak_db);
   const rms     = ref(SILENT.rms_db);
   const peakMax = ref(SILENT.peak_max_db);
+  // The rest of the snapshot, so a bus strip can drive the same meter widget
+  // as the master: true peak for dBTP, K-weighted mean squares for the
+  // momentary and short-term loudness readouts. The server has always sent
+  // these per lane; nothing read them.
+  const truePeak    = ref(SILENT.true_peak_db);
+  const truePeakMax = ref(SILENT.true_peak_max_db);
+  const kwMs        = ref(0);
+  const kwMsS       = ref(0);
+
+  const silence = () => {
+    peak.value = SILENT.peak_db; rms.value = SILENT.rms_db;
+    peakMax.value = SILENT.peak_max_db;
+    truePeak.value = SILENT.true_peak_db; truePeakMax.value = SILENT.true_peak_max_db;
+    kwMs.value = 0; kwMsS.value = 0;
+  };
 
   const unsubscribe = server.onMeters((m) => {
     const id = mixerId();
-    if (!id) { peak.value = SILENT.peak_db; rms.value = SILENT.rms_db; peakMax.value = SILENT.peak_max_db; return; }
+    if (!id) { silence(); return; }
     const frame: MixerMeterFrame | undefined =
       m.mixer_channels.find(x => x.mixer_id === id);
+    if (!frame) { silence(); return; }
 
     const which = lane?.();
     const src = (which != null && (frame as any)?.lanes?.[which])
       ? (frame as any).lanes[which]
       : frame;
 
-    peak.value    = src?.peak_db     ?? SILENT.peak_db;
-    rms.value     = src?.rms_db      ?? SILENT.rms_db;
-    peakMax.value = src?.peak_max_db ?? SILENT.peak_max_db;
+    peak.value        = src?.peak_db          ?? SILENT.peak_db;
+    rms.value         = src?.rms_db           ?? SILENT.rms_db;
+    peakMax.value     = src?.peak_max_db      ?? SILENT.peak_max_db;
+    truePeak.value    = src?.true_peak_db     ?? src?.peak_db     ?? SILENT.true_peak_db;
+    truePeakMax.value = src?.true_peak_max_db ?? src?.peak_max_db ?? SILENT.true_peak_max_db;
+    kwMs.value        = src?.kw_ms            ?? 0;
+    kwMsS.value       = src?.kw_ms_s          ?? 0;
   });
   onScopeDispose(() => unsubscribe());
 
-  return { peak, rms, peakMax };
+  return { peak, rms, peakMax, truePeak, truePeakMax, kwMs, kwMsS };
 }
 
 // ---------------------------------------------------------------------

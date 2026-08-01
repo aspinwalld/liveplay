@@ -101,9 +101,9 @@
 //     (until every component is migrated away from it) AND the new C++
 //     server via useLiveplayServer().stopAll(). Removing the legacy call
 //     is safe once all play paths route through the server.
-//   * The master mix meter is rendered by <LiveMeterBar source="master"
-//     :index="0" />, which consumes the live WebSocket meter stream from
-//     the engine — replacing the static-waveform "cheat" levels.
+//   * The output meters are <StereoMeter> pairs driven by the live WebSocket
+//     meter stream from the engine — replacing the static-waveform "cheat"
+//     levels. Every meter in the app is now that one component.
 import { formatKeyLabel } from '~/composables/useCartHotkeys';
 import type { AudioItem } from '~/types/project';
 import { useLiveplayServer } from '~/composables/useLiveplayServer';

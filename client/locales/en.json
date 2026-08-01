@@ -576,7 +576,6 @@
     "itemCount": "{count} item(s)",
     "channelDetails": "Channel details",
     "deleteBus": "Delete bus",
-    "widthToggle": "Toggle mono / stereo",
     "noStrip": "This bus has no engine strip",
     "comingSoon": "Not implemented yet",
     "insertsComingSoon": "Inserts are not implemented yet",

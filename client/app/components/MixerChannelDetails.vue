@@ -61,13 +61,14 @@
         <h4 class="det__h">{{ t('mixer.channel') }}</h4>
         <div class="det__meterfader">
           <div class="det__meters" :style="{ height: METER_TRACK_PCT + '%' }">
-            <LiveMeterBar
-              v-for="lane in (bus.mixerId ? (bus.width >= 2 ? [0, 1] : [null]) : [])"
-              :key="'lane' + lane"
-              source="mixer"
+            <!-- Same meter as the strip and the master: one set of zone
+                 colours, one peak hold, one meter mode. -->
+            <StereoMeter
+              v-if="bus.mixerId"
               :mixer-id="bus.mixerId"
-              :lane="lane"
-              vertical
+              :mono="bus.width < 2"
+              bare
+              :show-scale="false"
               :min-db="FADER_MIN_DB"
               :max-db="METER_MAX_DB"
             />
@@ -164,7 +165,7 @@
 import { computed, ref } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
-import LiveMeterBar from './LiveMeterBar.vue';
+import StereoMeter from './StereoMeter.vue';
 import MeterScale from './MeterScale.vue';
 import {
   FADER_MIN_DB, FADER_MAX_DB, METER_MAX_DB, METER_TRACK_PCT,

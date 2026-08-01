@@ -19,3 +19,22 @@ export const METER_MAX_DB = 0;
 /** Meter track height, as a percentage of the fader's travel. */
 export const METER_TRACK_PCT =
   ((METER_MAX_DB - FADER_MIN_DB) / (FADER_MAX_DB - FADER_MIN_DB)) * 100;
+
+/**
+ * How a meter reading is written out, in whichever unit the project's meter
+ * mode selects. Shared so a channel strip and the master can never disagree
+ * about what the same signal reads — they showed different things when the
+ * strips displayed raw sample peak while the master honoured the mode.
+ *
+ * LUFS labels the momentary value "M"; the short-term "S" line is a separate
+ * readout because it is a different measurement, not a different format.
+ */
+export function formatMeterLabel(db: number, mode: string): string {
+  if (db <= -119) return '-∞';
+  if (mode === 'LUFS') return `M ${db.toFixed(1)}`;
+  return `${Math.round(db)} ${mode}`;
+}
+
+export function formatShortTermLabel(db: number): string {
+  return db <= -119 ? 'S -∞' : `S ${db.toFixed(1)}`;
+}
