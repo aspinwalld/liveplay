@@ -47,7 +47,9 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 | **The master is a `MixerStrip` with `master` set**, not bespoke markup in `MixerPanel`. | It had its own padding, spacing and row set, so the one strip that matters most looked unlike every other. Every row now exists on both — blank where it does not apply — because the faders only line up across the rail if the rows above and below them match. |
 | **Bus width moved from the strip to the channel-details view.** | A button reading "M" sitting next to one reading "MUTE" is a trap, and width is a setup decision rather than a live one. The strip reports it next to the button that opens where it can be changed. |
 | **The meter/fader block is the only part of a strip that flexes.** | It had a `min-height`, so a short pane overflowed instead of the fader getting shorter. Everything else is fixed height and the fader absorbs the difference, down to a floor where the pane scrolls instead. |
-| **The channel view replaces the rail instead of docking under it, and drops its tabs** (§8.4). Its left column is the selected strip, reusing `MixerStrip`. | Sharing the height left the strips half-size in the one mode with room for them, and moved the fader you were holding. Tabs put a compressor behind a click during a show. Reusing the strip means the controls are the same objects at the same size, with no second implementation to drift. |
+| **The channel view replaces the rail instead of docking under it, and drops its tabs** (§8.4). Its left column is a dedicated `MixerChannelFader`, not the rail strip. | Sharing the height left the strips half-size in the one mode with room for them, and moved the fader you were holding. Tabs put a compressor behind a click during a show. The channel column has room a rail strip does not — filters, a wider fader — so it is its own layout built from the same control components rather than the same layout twice. |
+| **EQ bands are columns and parameters are rows**, and every cell is a knob *and* a typeable box. | A column is a band, which is the thing an operator reaches for; the transpose makes you read across to find one band. Ear-driven and spec-driven work both happen, so both input styles are present. |
+| **Plugins**, not Inserts. | "Insert" names the routing; "plugin" names what the user is actually looking for. |
 | **Which channel is open is separate state from which strip is selected.** | With one value, any click on a strip threw the window out of the rail into the channel view. |
 | **The detached mixer window still takes the cart window's project-data IPC**, despite needing no document to function. | Meter zone colours come from `settings.outputTargetLevels`, and theme/accent from `theme` — without them the popped-out meters would colour off the EBU defaults and disagree with the same meter in the main window. Buses, meters and fader moves do go over that window's own WebSocket. |
 | **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
@@ -596,22 +598,38 @@ that shape carries a reason:
 | Zone | LivePlay |
 |---|---|
 | Header | Colour chip, name, width + output summary, delete, back to the rail |
-| Left column | **The selected channel's strip** — the same `MixerStrip`, same width, full height |
-| Main area | Every processing panel at once: Output routing, EQ, Dynamics, Inserts, and what feeds this bus |
-| Bottom | Channel select row across all buses, with ‹ › arrows |
+| Left column | `MixerChannelFader` — ‹ name ›, meters, fader, mute/PFL, HPF/LPF, pan. Full height |
+| Work area, left | **EQ** above, **Dynamics** below — half the height each where there is room |
+| Work area, centre | **Plugins** — insert slots, spanning both rows |
+| Work area, right | **Contributions** (what feeds this bus) and **Sends** (what it feeds) |
+| Bottom | Channel select row, each tile carrying a live meter, with ‹ › arrows |
 
-**The left column is the strip itself, not a redrawing of it.** Reusing `MixerStrip` means the
-fader, meter, pan and mute you were just using are literally the same controls at the same size —
-there is no second implementation to drift, and nothing moves under your hand when the view opens.
+**The channel column is not the rail strip.** A rail strip is a dense summary sized to sit twenty
+across; this is one channel with the height to carry filters and a bigger fader. They share every
+control component — `StereoMeter`, `MeterScale`, `CanvasFader`, `Knob` — so the parts stay identical
+even though the arrangement does not. Channel stepping sits either side of the name, where the
+thing being stepped is.
 
-**No tabs.** An operator reaching for a compressor mid-show should not have to find a tab first, so
-the panels are laid out together and flow into as many columns as the window allows. Tabs were in
-an earlier draft; they were the wrong trade for a live surface.
+**No tabs.** An operator reaching for a compressor mid-show should not have to find a tab first.
 
-**The select row along the bottom.** It is how you move between channels without leaving the view,
-and it keeps the whole desk reachable while working on one channel. The arrows step through the
-same order as the rail. Worth building in Stage 2 even though most of the page above it is shell,
-because it defines the navigation model.
+**EQ runs bands across, parameters down.** One column per band, rows for frequency, gain and Q. A
+column is then a band — the thing you actually reach for — and comparing one parameter across bands
+is a glance along a row. Every cell is a knob *and* a typeable box (`KnobField`), because an EQ set
+by ear and an EQ set from a spec sheet are both real jobs. The frequency axis on the curve is
+logarithmic, so an octave takes the same width everywhere.
+
+**The gate and the compressor share one transfer graph.** They act on the same axis — input level
+in, output level out — and one curve is how you see what the pair actually does. Two graphs would
+show two halves of one answer.
+
+**Half height, but responsive.** EQ and dynamics split the work area's height on a wide window.
+Below 1100px the area becomes a single column and each section takes the height it needs, so a
+laptop screen gets a usable EQ graph rather than a squeezed one.
+
+**The select row along the bottom carries meters.** The point of the row is knowing which channel to
+go to, and on a desk that judgement is made by watching level, not by reading names. No scale — at
+that size it would be unreadable — but the same meter component as everywhere else, so the colours
+mean the same thing.
 
 **Selection and "which channel is open" are separate.** When they were one value, any click on a
 strip threw the window out of the rail and into the channel view. Opening is now something you ask
