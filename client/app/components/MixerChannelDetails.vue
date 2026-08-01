@@ -46,32 +46,47 @@
         @select="(id: string) => $emit('select', id)"
       />
 
+      <!-- Two columns. EQ takes the height on the left with the plugin rack
+           tucked beneath it; dynamics takes the height on the right with the
+           connection panels beneath. EQ and dynamics are side by side rather
+           than stacked because stacking them made both too short to use. -->
       <div class="det__work">
-        <!-- EQ and dynamics share the left column of the work area, half the
-             height each where there is room. Below the breakpoint the whole
-             area becomes one column and they take the height they need, with
-             the area scrolling. -->
         <MixerEqPanel class="det__eq" />
-        <MixerDynamicsPanel class="det__dyn" />
 
+        <!-- Static height, packed as tight as the slots allow: the rack is a
+             list of six things, not a workspace, so it should never take room
+             the EQ could use. -->
         <section class="det__panel det__panel--pending det__plugins">
           <h4 class="det__h">
             {{ t('mixer.plugins') }}
             <span class="det__pending">{{ t('mixer.notImplemented') }}</span>
           </h4>
-          <button v-for="n in 6" :key="n" class="det__insert" disabled>
-            <span class="det__insertnum">{{ n }}</span>
-            <span>{{ t('mixer.emptySlot') }}</span>
-          </button>
+          <div class="det__rack">
+            <button v-for="n in 6" :key="n" class="det__insert" disabled>
+              <span class="det__insertnum">{{ n }}</span>
+              <span class="det__insertname">{{ t('mixer.emptySlot') }}</span>
+            </button>
+          </div>
         </section>
 
+        <MixerDynamicsPanel class="det__dyn" />
+
+        <!-- What is connected, both directions. The row is as tall as the
+             sends panel needs and no taller; the contributions list scrolls
+             inside itself, with the count in the heading so the length is
+             known without scrolling it. -->
         <div class="det__io">
-          <section class="det__panel">
-            <h4 class="det__h">{{ t('mixer.feedingThis') }}</h4>
-            <ul class="det__items">
-              <li v-for="uuid in bus.itemUuids" :key="uuid">{{ itemName(uuid) }}</li>
-              <li v-if="bus.itemUuids.length === 0" class="det__none">{{ t('mixer.nothingAssigned') }}</li>
-            </ul>
+          <section class="det__panel det__contrib">
+            <h4 class="det__h">
+              {{ t('mixer.feedingThis') }}
+              <span class="det__count">{{ bus.itemUuids.length }}</span>
+            </h4>
+            <div class="det__contriblist">
+              <ul v-if="bus.itemUuids.length" class="det__items">
+                <li v-for="uuid in bus.itemUuids" :key="uuid">{{ itemName(uuid) }}</li>
+              </ul>
+              <p v-else class="det__none">{{ t('mixer.nothingAssigned') }}</p>
+            </div>
           </section>
 
           <section class="det__panel">
@@ -251,11 +266,14 @@ function itemName(uuid: string): string {
 
 .det__main { display: flex; flex: 1; min-height: 0; min-width: 0; }
 
+/* Row 1 takes the height (EQ | dynamics); row 2 is as tall as its content
+   needs (plugin rack | connections). minmax(0, 1fr) rather than 1fr so the
+   flexible row is allowed to shrink below its content instead of pushing the
+   grid taller than the window. */
 .det__work {
   display: grid;
-  /* EQ column takes the room; plugins and I/O are narrow lists. */
-  grid-template-columns: minmax(320px, 2fr) minmax(180px, 1fr) minmax(200px, 1fr);
-  grid-template-rows: 1fr 1fr;
+  grid-template-columns: minmax(340px, 1fr) minmax(430px, 1.15fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: var(--spacing-sm);
   flex: 1;
   min-width: 0;
@@ -263,14 +281,14 @@ function itemName(uuid: string): string {
   overflow: auto;
 }
 .det__eq      { grid-column: 1; grid-row: 1; }
-.det__dyn     { grid-column: 1; grid-row: 2; }
-.det__plugins { grid-column: 2; grid-row: 1 / span 2; }
-.det__io      { grid-column: 3; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: var(--spacing-sm); min-height: 0; }
+.det__plugins { grid-column: 1; grid-row: 2; }
+.det__dyn     { grid-column: 2; grid-row: 1; }
+.det__io      { grid-column: 2; grid-row: 2; }
 
-/* Narrow window: one column, sections take the height they need and the work
-   area scrolls. This is the "full height where needed" case — the EQ graph
-   stops being squeezed into half a short window. */
-@media (max-width: 1100px) {
+/* Narrow: one column. Everything takes the height it needs and the work area
+   scrolls, which is where the EQ graph gets its full height back rather than
+   being squeezed into a fraction of a small window. */
+@media (max-width: 1180px) {
   .det__work {
     grid-template-columns: 1fr;
     grid-template-rows: none;
@@ -280,6 +298,20 @@ function itemName(uuid: string): string {
     grid-column: 1;
     grid-row: auto;
   }
+}
+
+/* Short: the same escape, for height. Squeezing two full panels into a short
+   window leaves both unusable, so stop dividing the height and let the work
+   area scroll instead. */
+@media (max-height: 660px) {
+  .det__work {
+    grid-template-rows: none;
+    grid-auto-rows: min-content;
+  }
+  .det__eq      { grid-row: auto; }
+  .det__plugins { grid-row: auto; }
+  .det__dyn     { grid-row: auto; }
+  .det__io      { grid-row: auto; }
 }
 
 .det__panel {
@@ -313,12 +345,18 @@ function itemName(uuid: string): string {
   color: var(--color-text-disabled);
 }
 
-.det__plugins { overflow-y: auto; }
+/* Three across, two down — six slots in the shortest arrangement, since this
+   panel must not take height the EQ above it could use. */
+.det__rack {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
 .det__insert {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
+  gap: 5px;
+  min-width: 0;
   font-size: 11px;
   padding: 5px 6px;
   color: var(--color-text-disabled);
@@ -327,7 +365,8 @@ function itemName(uuid: string): string {
   border-radius: var(--border-radius-sm);
   cursor: not-allowed;
 }
-.det__insertnum { font-family: var(--font-mono); font-size: 9px; opacity: 0.6; }
+.det__insertnum { font-family: var(--font-mono); font-size: 9px; opacity: 0.6; flex: 0 0 auto; }
+.det__insertname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .det__field {
   display: flex;
@@ -347,14 +386,45 @@ function itemName(uuid: string): string {
 }
 
 .det__warn { margin: 0; font-size: 11px; color: var(--color-warning); }
+.det__none { list-style: none; margin: 0; font-size: 11px; color: var(--color-text-disabled); }
+
+/* Contributions and sends sit side by side and stretch to the same height.
+   Which one decides that height matters: a bus can feed a hundred cues, and
+   letting the list drive it would push the panel off the bottom of the window.
+   So the list is taken out of flow — absolutely positioned inside a box with a
+   modest minimum — and the sends panel, whose content is fixed, sets the row
+   height. The count in the heading is what the list length is for. */
+.det__io {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
+  gap: var(--spacing-sm);
+  min-height: 0;
+}
+.det__contrib { min-height: 0; }
+.det__count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 5px;
+  color: var(--color-text-secondary);
+  background: var(--color-background);
+  border-radius: 8px;
+}
+.det__contriblist {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 44px;
+}
 .det__items {
+  position: absolute;
+  inset: 0;
   margin: 0;
   padding-left: 16px;
   font-size: 11px;
   color: var(--color-text-primary);
   overflow-y: auto;
 }
-.det__none { list-style: none; margin: 0; font-size: 11px; color: var(--color-text-disabled); }
 
 .det__bank {
   display: flex;

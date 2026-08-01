@@ -1,11 +1,13 @@
 <template>
   <!--
-    Dynamics: an expander/gate and a compressor/limiter, sharing one transfer
-    graph.
+    Dynamics: an expander/gate and a compressor/limiter.
 
-    They share it because they act on the same axis — input level in, output
-    level out — and a single curve is how you see what the two together
-    actually do to a signal. Two graphs would show two halves of one answer.
+    Left to right: the transfer graph at full height, then a gain-reduction
+    meter for each processor, then their controls. The graph is shared because
+    both act on the same axis — input level in, output level out — and one
+    curve is how you see what the two together do to a signal; two graphs would
+    show two halves of one answer. The GR meters are not shared, because how
+    much each one is pulling is exactly what you need to tell them apart.
 
     Shell until the DSP stage lands: dashed, labelled, controls disabled.
   -->
@@ -15,39 +17,54 @@
       <span class="det__pending">{{ t('mixer.notImplemented') }}</span>
     </h4>
 
-    <!-- Transfer curve: input level across, output level down. Unity is the
-         diagonal; the gate pulls the bottom-left down and the compressor
-         flattens the top-right. Drawn flat-unity until there is something to
-         plot. -->
-    <div class="dyn__graph">
-      <svg viewBox="0 0 120 120" preserveAspectRatio="none" class="dyn__svg">
-        <line v-for="g in [30, 60, 90]" :key="'v' + g" class="dyn__grid" :x1="g" :x2="g" y1="0" y2="120" />
-        <line v-for="g in [30, 60, 90]" :key="'h' + g" class="dyn__grid" x1="0" x2="120" :y1="g" :y2="g" />
-        <line class="dyn__unity" x1="0" y1="120" x2="120" y2="0" />
-      </svg>
-    </div>
-
-    <div class="dyn__group">
-      <h5 class="dyn__h">{{ t('mixer.gate') }}</h5>
-      <div class="dyn__row">
-        <KnobField
-          v-for="p in gateParams" :key="p.key"
-          :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
-          :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
-          :size="32" disabled
-        />
+    <div class="dyn__body">
+      <!-- Transfer curve: input level across, output level down. Unity is the
+           diagonal; the gate pulls the bottom-left down and the compressor
+           flattens the top-right. Flat-unity until there is something to
+           plot. -->
+      <div class="dyn__graph">
+        <svg viewBox="0 0 120 120" preserveAspectRatio="none" class="dyn__svg">
+          <line v-for="g in [30, 60, 90]" :key="'v' + g" class="dyn__grid" :x1="g" :x2="g" y1="0" y2="120" />
+          <line v-for="g in [30, 60, 90]" :key="'h' + g" class="dyn__grid" x1="0" x2="120" :y1="g" :y2="g" />
+          <line class="dyn__unity" x1="0" y1="120" x2="120" y2="0" />
+        </svg>
       </div>
-    </div>
 
-    <div class="dyn__group">
-      <h5 class="dyn__h">{{ t('mixer.compressor') }}</h5>
-      <div class="dyn__row">
-        <KnobField
-          v-for="p in compParams" :key="p.key"
-          :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
-          :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
-          :size="32" disabled
-        />
+      <!-- Gain reduction, one per processor. Deliberately not StereoMeter:
+           that measures signal level against the project's output target,
+           and this measures how far a processor is pulling down — a different
+           quantity on a different scale. Empty until the processors exist. -->
+      <div class="dyn__grmeters">
+        <div v-for="m in ['mixer.gateShort', 'mixer.compShort']" :key="m" class="dyn__gr">
+          <div class="dyn__grtrack"></div>
+          <span class="dyn__grlabel">{{ t(m) }}</span>
+        </div>
+      </div>
+
+      <div class="dyn__controls">
+        <div class="dyn__group">
+          <h5 class="dyn__h">{{ t('mixer.gate') }}</h5>
+          <div class="dyn__row">
+            <KnobField
+              v-for="p in gateParams" :key="p.key"
+              :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
+              :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
+              :size="32" disabled
+            />
+          </div>
+        </div>
+
+        <div class="dyn__group">
+          <h5 class="dyn__h">{{ t('mixer.compressor') }}</h5>
+          <div class="dyn__row">
+            <KnobField
+              v-for="p in compParams" :key="p.key"
+              :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
+              :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
+              :size="32" disabled
+            />
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -60,6 +77,7 @@ const { t } = useLocalization();
 
 // Ranges are the conventional ones for each control, so the knobs already
 // travel correctly when the processors arrive and only the values need wiring.
+// Six each, which lays out as two rows of three.
 const gateParams = [
   { key: 'mixer.threshold', value: -40, min: -80, max: 0,    origin: -40,  decimals: 1, unit: 'dB' },
   { key: 'mixer.ratio',     value: 2,   min: 1,   max: 20,   origin: 2,    decimals: 1, unit: ':1' },
@@ -80,13 +98,22 @@ const compParams = [
 </script>
 
 <style scoped>
-.dyn { min-height: 0; overflow: auto; }
+.dyn { min-height: 0; }
+.dyn > .det__h { flex: 0 0 auto; }
 
+.dyn__body {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Full height of the panel, square, so the transfer curve keeps its 1:1
+   reading — a stretched dynamics graph lies about the slope. */
 .dyn__graph {
-  height: 96px;
-  min-height: 64px;
-  align-self: center;
+  flex: 0 0 auto;
   aspect-ratio: 1;
+  min-width: 90px;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;
@@ -95,6 +122,43 @@ const compParams = [
 .dyn__grid  { stroke: var(--color-border); stroke-width: 1; opacity: 0.5; }
 .dyn__unity { stroke: var(--color-accent); stroke-width: 2; }
 
+.dyn__grmeters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.dyn__gr {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.dyn__grtrack {
+  width: 8px;
+  height: 100%;
+  min-height: 24px;
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
+}
+.dyn__grlabel {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  writing-mode: vertical-rl;
+  color: var(--color-text-disabled);
+}
+
+.dyn__controls {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  gap: var(--spacing-xs);
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .dyn__group { display: flex; flex-direction: column; gap: 2px; }
 .dyn__h {
   margin: 0;
@@ -103,9 +167,11 @@ const compParams = [
   text-transform: uppercase;
   color: var(--color-text-disabled);
 }
+/* Six controls, always three across, so each processor reads as two tidy rows
+   rather than reflowing into a ragged block as the panel resizes. */
 .dyn__row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(52px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   justify-items: center;
 }

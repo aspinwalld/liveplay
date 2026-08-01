@@ -595,6 +595,8 @@
     "auxSendsPending": "Aux sends arrive with bus-to-bus routing.",
     "gate": "Expander / Gate",
     "compressor": "Compressor / Limiter",
+    "gateShort": "EXP",
+    "compShort": "COMP",
     "hpf": "HPF",
     "lpf": "LPF",
     "freq": "Freq",

@@ -599,9 +599,8 @@ that shape carries a reason:
 |---|---|
 | Header | Colour chip, name, width + output summary, delete, back to the rail |
 | Left column | `MixerChannelFader` — ‹ name ›, meters, fader, mute/PFL, HPF/LPF, pan. Full height |
-| Work area, left | **EQ** above, **Dynamics** below — half the height each where there is room |
-| Work area, centre | **Plugins** — insert slots, spanning both rows |
-| Work area, right | **Contributions** (what feeds this bus) and **Sends** (what it feeds) |
+| Work area, left | **EQ** taking the height, with the **Plugins** rack beneath it at a fixed height |
+| Work area, right | **Dynamics** taking the height, with **Contributions** and **Sends** beneath |
 | Bottom | Channel select row, each tile carrying a live meter, with ‹ › arrows |
 
 **The channel column is not the rail strip.** A rail strip is a dense summary sized to sit twenty
@@ -618,13 +617,29 @@ is a glance along a row. Every cell is a knob *and* a typeable box (`KnobField`)
 by ear and an EQ set from a spec sheet are both real jobs. The frequency axis on the curve is
 logarithmic, so an octave takes the same width everywhere.
 
-**The gate and the compressor share one transfer graph.** They act on the same axis — input level
-in, output level out — and one curve is how you see what the pair actually does. Two graphs would
-show two halves of one answer.
+**EQ never scrolls its controls.** The band grid keeps its natural height and the graph absorbs
+whatever is left. An EQ you can see but not adjust is worse than one you have to scroll to reach.
 
-**Half height, but responsive.** EQ and dynamics split the work area's height on a wide window.
-Below 1100px the area becomes a single column and each section takes the height it needs, so a
-laptop screen gets a usable EQ graph rather than a squeezed one.
+**The gate and the compressor share one transfer graph, but not their meters.** They act on the
+same axis — input level in, output level out — and one curve is how you see what the pair actually
+does; two graphs would show two halves of one answer. Gain reduction is the opposite case: how far
+each one is pulling is exactly what tells them apart, so they get a meter each. Those are
+deliberately *not* `StereoMeter` — that measures signal level against the project's output target,
+and this measures how far a processor is pulling down. Different quantity, different scale.
+
+**EQ and dynamics sit side by side, not stacked.** Stacking them made both too short to use.
+Beneath each sits the thing that belongs to it and needs no height of its own: the plugin rack
+under EQ (three across, two down — six slots in the shortest arrangement), the connection panels
+under dynamics.
+
+**Two escapes, one per axis.** Below 1180px wide *or* 660px tall, the grid stops dividing space and
+becomes a single column of natural-height sections that the work area scrolls. Squeezing two full
+panels into a small window leaves both unusable; scrolling costs a gesture and keeps them whole.
+
+**Contributions is capped by Sends, not the other way round.** A bus can feed a hundred cues, so
+letting that list drive the row height would push the panel off the bottom of the window. The list
+is taken out of flow and scrolls inside itself; the sends panel, whose content is fixed, sets the
+height. The count in the contributions heading is what the list length is for.
 
 **The select row along the bottom carries meters.** The point of the row is knowing which channel to
 go to, and on a desk that judgement is made by watching level, not by reading names. No scale — at

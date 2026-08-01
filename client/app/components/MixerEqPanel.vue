@@ -23,7 +23,8 @@
 
     <!-- Response curve. Flat, with a handle per band at its frequency —
          the shape the real curve will take, so the panel does not change
-         layout when it starts working. -->
+         layout when it starts working. This is the part that grows into
+         spare height; the band controls below it are never squeezed. -->
     <div class="eq__graph">
       <svg viewBox="0 0 400 120" preserveAspectRatio="none" class="eq__svg">
         <line
@@ -107,13 +108,17 @@ const handleColor = (i: number) =>
 </script>
 
 <style scoped>
-.eq { min-height: 0; overflow: auto; }
+/* The controls never clip: they keep their natural height and the graph
+   absorbs whatever is left. If the panel still cannot fit, the work area
+   scrolls rather than the knobs disappearing off the bottom — an EQ you can
+   see but not adjust is worse than one you have to scroll to. */
+.eq { min-height: 0; }
+.eq > *:not(.eq__graph) { flex: 0 0 auto; }
 
 .eq__graph {
   position: relative;
-  height: 110px;
-  min-height: 76px;
   flex: 1 1 auto;
+  min-height: 120px;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;
