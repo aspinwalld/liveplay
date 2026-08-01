@@ -125,22 +125,19 @@
       
       <!-- Output Tab -->
       <div v-if="activeTab === 'output' && selectedItem.type === 'audio'" class="tab-panel">
+        <!-- Bus assignment is the whole of an item's routing. Where that bus
+             then goes — hardware, level, processing — is the mixer's business,
+             not the item's. -->
         <div class="property-field">
-          <label>{{ t('properties.deviceOverride') }}</label>
-          <select
-            :value="(audioItem as any).deviceOverride ?? ''"
-            @change="onDeviceOverrideChange"
-          >
-            <option value="">{{ t('settings.useProjectDefault') }}</option>
-            <option
-              v-for="d in devicesList"
-              :key="d.id"
-              :value="d.id"
-            >
-              {{ d.display_name }}{{ d.is_default ? ' (' + t('common.default') + ')' : '' }}
-            </option>
+          <label>{{ t('properties.bus') }}</label>
+          <select :value="(audioItem as any).busId ?? ''" @change="onBusChange">
+            <option value="">{{ t('properties.busInherit') }}</option>
+            <option v-for="b in assignableBuses" :key="b.id" :value="b.id">{{ b.name }}</option>
           </select>
-          <p class="property-help">{{ t('properties.deviceOverrideHelp') }}</p>
+          <p class="property-help">{{ t('properties.busHelp') }}</p>
+          <p v-if="effectiveBusName" class="property-help">
+            {{ t('properties.busEffective', { name: effectiveBusName }) }}
+          </p>
         </div>
 
         <!-- LTC Output Section -->
@@ -331,15 +328,28 @@ const apiTriggerUrl = computed(() => {
   const base = (_server.serverUrl ?? 'http://127.0.0.1:4480').replace(/\/+$/, '');
   return `${base}/api/project/items/${selectedItem.value?.uuid}/play`;
 });
-const onDeviceOverrideChange = (e: Event) => {
+// Bus assignment. An item carries busId and nothing else about routing; the
+// bus decides where the audio goes. Clearing it means "inherit" — from the
+// nearest ancestor group, or Main if no group assigns one.
+const assignableBuses = computed(() =>
+  (_server.buses ?? []).filter((b: any) => !b.system));
+
+// What the item actually resolves to, which is not the same as what is written
+// on it: with no assignment of its own it may still inherit one from a group.
+const effectiveBusName = computed(() => {
+  const it = audioItem.value as any;
+  if (!it?.uuid || it.busId) return '';
+  const owner = (_server.buses ?? []).find((b: any) => b.itemUuids?.includes(it.uuid));
+  return owner?.name ?? '';
+});
+
+const onBusChange = async (e: Event) => {
   const v = (e.target as HTMLSelectElement).value;
   const it = audioItem.value as any;
-  if (!v) {
-    delete it.deviceOverride;
-  } else {
-    it.deviceOverride = v;
-  }
+  if (!v) delete it.busId; else it.busId = v;
   handleSave();
+  // Membership is resolved server-side, so refresh the mixer's view of it.
+  try { await _server.fetchBuses(); } catch { /* offline */ }
 };
 
 // LTC helpers

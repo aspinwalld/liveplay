@@ -90,17 +90,27 @@
 
     <div class="strip__gain">{{ gainLabel }}</div>
 
-    <!-- Scribble strip. -->
-    <div class="strip__name" :title="bus.name">
+    <!-- Scribble strip. Double-click to rename, as on a desk. -->
+    <div class="strip__name" :title="renaming ? '' : bus.name + ' — ' + t('mixer.renameHint')">
       <span class="strip__chip" :style="{ background: bus.color || 'var(--color-accent)' }"></span>
-      <span class="strip__nametext">{{ bus.name }}</span>
+      <input
+        v-if="renaming"
+        ref="nameInput"
+        class="strip__nameinput"
+        :value="bus.name"
+        @click.stop
+        @keyup.enter="commitRename"
+        @keyup.esc="renaming = false"
+        @blur="commitRename"
+      />
+      <span v-else class="strip__nametext" @dblclick.stop="startRename">{{ bus.name }}</span>
     </div>
     <div class="strip__count">{{ t('mixer.itemCount', { count: bus.itemUuids.length }) }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import LiveMeterBar from './LiveMeterBar.vue';
@@ -151,6 +161,22 @@ function onFader(db: number) {
 }
 
 onBeforeUnmount(() => { if (settle) clearTimeout(settle); });
+
+const renaming  = ref(false);
+const nameInput = ref<HTMLInputElement | null>(null);
+
+async function startRename() {
+  if (props.bus.system) return;
+  renaming.value = true;
+  await nextTick();
+  nameInput.value?.select();
+}
+function commitRename() {
+  if (!renaming.value) return;
+  renaming.value = false;
+  const next = nameInput.value?.value?.trim();
+  if (next && next !== props.bus.name) emit('patch', props.bus.id, { name: next });
+}
 
 // Mute goes to the engine first so it takes effect on the click rather than
 // after the document round-trip, then persists.
@@ -289,6 +315,17 @@ function onOutputChange(e: Event) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+}
+.strip__nameinput {
+  width: 100%;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: 2px;
+  padding: 0 2px;
 }
 .strip__count {
   text-align: center;
