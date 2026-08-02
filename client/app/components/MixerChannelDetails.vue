@@ -270,14 +270,16 @@ function itemName(uuid: string): string {
 
 .det__main { display: flex; flex: 1; min-height: 0; min-width: 0; }
 
-/* Row 1 takes the height (EQ | dynamics); row 2 is as tall as its content
-   needs (plugin rack | connections). minmax(0, 1fr) rather than 1fr so the
-   flexible row is allowed to shrink below its content instead of pushing the
-   grid taller than the window. */
+/* Row 1 (EQ | dynamics) sizes to its content, which is now knowable: both
+   graphs have a definite height that scales with the window up to a cap. Row 2
+   (plugin rack | connections) takes whatever is left, so once the EQ stops
+   growing the spare height goes somewhere useful instead of padding out a
+   panel that has finished. minmax(0, 1fr) so it can also shrink to nothing on
+   a short window rather than pushing the grid past the viewport. */
 .det__work {
   display: grid;
   grid-template-columns: minmax(340px, 1fr) minmax(430px, 1.15fr);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: var(--spacing-sm);
   flex: 1;
   min-width: 0;
@@ -348,18 +350,25 @@ function itemName(uuid: string): string {
   color: var(--color-text-disabled);
 }
 
-/* Three across, two down — six slots in the shortest arrangement, since this
-   panel must not take height the EQ above it could use. */
+/* Three across, two down. The rack no longer has to stay minimal: the EQ above
+   it now has a ceiling, so the slack below it is the rack's to use and the
+   slots grow into it rather than leaving a gap. */
+.det__plugins { min-height: 0; }
 .det__rack {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 1fr;
   gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .det__insert {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 5px;
   min-width: 0;
+  min-height: 26px;
   font-size: 11px;
   padding: 5px 6px;
   color: var(--color-text-disabled);

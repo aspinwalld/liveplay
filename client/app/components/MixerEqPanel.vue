@@ -113,12 +113,16 @@ const handleColor = (i: number) =>
    scrolls rather than the knobs disappearing off the bottom — an EQ you can
    see but not adjust is worse than one you have to scroll to. */
 .eq { min-height: 0; }
-.eq > *:not(.eq__graph) { flex: 0 0 auto; }
+.eq > * { flex: 0 0 auto; }
 
+/* The graph scales with the window between a usable floor and a ceiling past
+   which extra height tells you nothing more about a curve. Sized rather than
+   flexed on purpose: a definite height makes this panel's total height
+   knowable, which is what lets the grid hand the leftover space to the panels
+   below instead of padding this one out. */
 .eq__graph {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 120px;
+  height: clamp(150px, 26vh, 300px);
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;

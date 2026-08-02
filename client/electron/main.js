@@ -1137,6 +1137,12 @@ let stateViewerWindow = null; // Debug state viewer window
 let cartPlayerWindow = null;  // Detached cart player window
 let mixerWindow = null;       // Detached mixer window
 
+// Minimum size for windows that host the full editing surface. Applied to the
+// main window and the detached mixer, both of which render the mixer's channel
+// view. Not applied to the cart player: that is a pad grid, and shrinking it to
+// a corner of a screen is a legitimate way to use it.
+const MIN_WINDOW = { minWidth: 1280, minHeight: 768 };
+
 // Flatten all audio items from a nested project items array
 function flattenAudioItems(items) {
   const result = [];
@@ -1508,8 +1514,11 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1200,
-    minHeight: 700,
+    // The floor the layouts are designed against. The mixer's channel view in
+    // particular assumes it can put a channel column, an EQ and a dynamics
+    // section side by side; below this it degrades to stacked, scrolling
+    // sections, which works but is not what anyone should be running a show on.
+    ...MIN_WINDOW,
     icon: path.join(__dirname, '../assets/icons/2x/app_icon_darkmode@2x.png'),
     webPreferences: {
       nodeIntegration: false,
@@ -1637,10 +1646,9 @@ function createMixerWindow() {
   }
 
   mixerWindow = new BrowserWindow({
-    width: 1000,
-    height: 720,
-    minWidth: 420,
-    minHeight: 460,
+    width: 1440,
+    height: 860,
+    ...MIN_WINDOW,
     title: 'LivePlay - Mixer',
     icon: path.join(__dirname, '../assets/icons/2x/app_icon_darkmode@2x.png'),
     webPreferences: {

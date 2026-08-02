@@ -112,15 +112,16 @@ const compParams = [
    graph lies about the slope. Capped, because square plus full panel height
    means it grows without limit on a tall window and swallows the panel; past
    this size it stops telling you anything more. */
+/* Sized, not stretched: the box has no content of its own, so stretching was
+   the only thing giving it height — and stretching is also what pinned it to
+   the top of a panel taller than it. A definite height lets it centre against
+   the controls beside it, which is where the eye expects the curve to sit. */
 .dyn__graph {
   flex: 0 0 auto;
+  align-self: center;
   aspect-ratio: 1;
-  min-width: 90px;
-  /* Stretch, then clamp — the box has no content of its own, so it needs the
-     row's height to have any height at all. A max-height under stretch also
-     pins it to the top once clamped, which is where it belongs. */
-  align-self: stretch;
-  max-height: 190px;
+  height: clamp(110px, 18vh, 190px);
+  max-height: 100%;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;
@@ -129,14 +130,15 @@ const compParams = [
 .dyn__grid  { stroke: var(--color-border); stroke-width: 1; opacity: 0.5; }
 .dyn__unity { stroke: var(--color-accent); stroke-width: 2; }
 
-/* Same cap as the graph, and clamped the same way, so the two stay one block. */
+/* Sized and centred to match the graph, so the two read as one block. */
 .dyn__grmeters {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
   flex: 0 0 auto;
-  align-self: stretch;
-  max-height: 190px;
+  align-self: center;
+  height: clamp(110px, 18vh, 190px);
+  max-height: 100%;
   min-height: 0;
 }
 .dyn__gr {

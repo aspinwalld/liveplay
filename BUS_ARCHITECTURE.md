@@ -618,8 +618,12 @@ is a glance along a row. Every cell is a knob *and* a typeable box (`KnobField`)
 by ear and an EQ set from a spec sheet are both real jobs. The frequency axis on the curve is
 logarithmic, so an octave takes the same width everywhere.
 
-**EQ never scrolls its controls.** The band grid keeps its natural height and the graph absorbs
-whatever is left. An EQ you can see but not adjust is worse than one you have to scroll to reach.
+**EQ never scrolls its controls.** The band grid keeps its natural height and the graph is *sized*
+rather than flexed — `clamp(150px, 26vh, 300px)`, scaling with the window between a usable floor
+and a ceiling past which extra height says nothing more about a curve. A definite height is what
+makes the panel's total height knowable, which is what lets the grid hand the leftover space to the
+plugin rack and connection panels below instead of padding out a panel that has finished growing.
+An EQ you can see but not adjust is worse than one you have to scroll to reach.
 
 **The gate and the compressor share one transfer graph, but not their meters.** They act on the
 same axis — input level in, output level out — and one curve is how you see what the pair actually
@@ -632,6 +636,12 @@ and this measures how far a processor is pulling down. Different quantity, diffe
 Beneath each sits the thing that belongs to it and needs no height of its own: the plugin rack
 under EQ (three across, two down — six slots in the shortest arrangement), the connection panels
 under dynamics.
+
+**The window has a floor of 1280x768** (`MIN_WINDOW` in `client/electron/main.js`), applied to the
+main window and the detached mixer but not the cart player, which is a pad grid and is legitimately
+used shrunk into a corner. The breakpoints below stay as a safety net for display scaling and for
+the docked side pane, but the channel view is designed against that floor rather than against
+arbitrarily small windows.
 
 **Two escapes, one per axis, and they are not the same escape.** Below 1180px *wide* the grid
 collapses to a single column. Below 660px *tall* it keeps both columns and only stops dividing the
