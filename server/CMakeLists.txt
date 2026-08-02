@@ -197,10 +197,14 @@ if(LIVEPLAY_BUILD_TESTS)
     add_test(NAME meter COMMAND liveplay-meter-tests)
 
     # Mixer strip gain / fade envelope (peek vs. advance).
+    # Also covers the PFL monitor taps, which is why limiter.cpp is here: it
+    # carries db_to_linear_precise, and the tap gain has to be the same number
+    # the engine uses, not a re-derivation of it.
     add_executable(liveplay-mixer-tests
         tests/mixer_channel_test.cpp
         src/audio/mixer_channel.cpp
         src/audio/meter.cpp
+        src/audio/limiter.cpp
     )
     target_include_directories(liveplay-mixer-tests
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -29,8 +29,12 @@ void MixerChannel::set_mute(bool muted) noexcept {
     muted_.store(muted, std::memory_order_relaxed);
 }
 
-void MixerChannel::set_solo(bool soloed) noexcept {
-    soloed_.store(soloed, std::memory_order_relaxed);
+void MixerChannel::set_pfl(bool on) noexcept {
+    pfl_.store(on, std::memory_order_relaxed);
+}
+
+void MixerChannel::set_width(ChannelCount w) noexcept {
+    width_.store(std::clamp<ChannelCount>(w, 1, kMixerLanes), std::memory_order_relaxed);
 }
 
 void MixerChannel::begin_fade(float target_db, std::chrono::milliseconds duration) noexcept {

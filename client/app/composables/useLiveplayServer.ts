@@ -338,6 +338,17 @@ function createClient() {
           // The payload carries the definitions, but not the resolved item
           // membership, which only the server can compute.
           if (payload.op === 'buses_patched') void fetchBuses();
+          // PFL isn't in the document, so it arrives as its own op and is
+          // applied in place. A refetch would work too, but PFL is pressed
+          // while something is playing and the whole bus list is the last
+          // thing worth re-pulling at that moment.
+          if (payload.op === 'bus_pfl_changed' && typeof payload.id === 'string') {
+            const b = buses.value.find(x => x.id === payload.id);
+            if (b) b.pfl = !!payload.pfl;
+          }
+          if (payload.op === 'bus_pfl_cleared') {
+            for (const b of buses.value) b.pfl = false;
+          }
           // Handle output_channel_gain_changed locally before fanning out.
           if (payload.op === 'output_channel_gain_changed' &&
               typeof payload.channel === 'number' &&
@@ -899,6 +910,31 @@ function createClient() {
     });
   }
 
+  // Pre-fade listen. The button is set locally first because the operator is
+  // holding it against a cue that is playing right now — waiting a round trip
+  // to light up reads as a dropped press. The server broadcasts the change, so
+  // every other window converges on the same value anyway.
+  async function setBusPfl(id: string, on: boolean) {
+    const b = buses.value.find(x => x.id === id);
+    if (b) b.pfl = on;
+    try {
+      await rest(`/api/buses/${encodeURIComponent(id)}/pfl`, {
+        method: 'POST',
+        body: JSON.stringify({ pfl: on }),
+      });
+    } catch (e) {
+      // Refused (the Monitor bus) or offline: put the button back where the
+      // server still has it rather than leaving a lie lit.
+      if (b) b.pfl = !on;
+      throw e;
+    }
+  }
+
+  async function clearAllPfl() {
+    for (const b of buses.value) b.pfl = false;
+    return rest<{ cleared: number }>('/api/buses/pfl/clear', { method: 'POST' });
+  }
+
   async function deleteBus(id: string) {
     await rest(`/api/buses/${encodeURIComponent(id)}`, { method: 'DELETE' });
     await fetchBuses();
@@ -1214,6 +1250,8 @@ function createClient() {
     createBus,
     patchBus,
     setBusPan,
+    setBusPfl,
+    clearAllPfl,
     deleteBus,
     setItemBus,
     fetchOutputs,

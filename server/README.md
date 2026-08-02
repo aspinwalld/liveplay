@@ -210,12 +210,12 @@ Every cue's audio goes through three explicit tiers, in order, on the engine's r
  PlaybackItem  ─send─►  MixerChannel  ─send─►  Master Output Bus  ─hw─►  Device:HwCh
    (one per                (group bus,            (per-channel
    live cue,               gain/mute/             brick-wall
-   own decoder)            solo/fade)             limiter)
+   own decoder)            PFL/fade)              limiter)
 ```
 
 - **Tier 1 — [`PlaybackItem`](include/liveplay/audio/playback_item.hpp)**: one instance per active cue, with its own `ma_decoder`, gain/fade state machine, optional LTC generator, and a per-source-channel meter. Loading the same `.wav` into two cart slots yields **two independent instances**; attenuating one never affects the other.
-- **Tier 2 — [`MixerChannel`](include/liveplay/audio/mixer_channel.hpp)**: a virtual strip with gain, mute, solo, and a smooth-fade ramp. Many items can route into one channel; one item's source channels can fan out to multiple channels.
-- **Tier 3 — Master output bus** ([`engine.hpp`](include/liveplay/audio/engine.hpp)): 32 logical master channels by default, configurable from 4 to 1024 via `--master-channels`. Each carries a limiter + meter and is assigned to exactly one `(Device, HardwareChannelIndex)` tuple. The top two are reserved for the Preview bus.
+- **Tier 2 — [`MixerChannel`](include/liveplay/audio/mixer_channel.hpp)**: a virtual strip with gain, mute, PFL, and a smooth-fade ramp. Many items can route into one channel; one item's source channels can fan out to multiple channels. PFL adds a pre-fader, pre-mute tap into the designated Monitor strip and changes nothing else — it replaced solo, which no UI ever reached and which cost the render thread a per-block scan of every strip.
+- **Tier 3 — Master output bus** ([`engine.hpp`](include/liveplay/audio/engine.hpp)): 32 logical master channels by default, configurable from 4 to 1024 via `--master-channels`. Each carries a limiter + meter and is assigned to exactly one `(Device, HardwareChannelIndex)` tuple. The top two are reserved for the **Monitor** bus — the pre-listen destination, where both PFL and cue preview land.
 
 All three tiers run at a 256-frame block (~5.3 ms at 48 kHz). Meters and limiter envelopes update once per block.
 
@@ -344,7 +344,7 @@ This is the low-level cue surface — for normal use, prefer the project-item su
 
 | Method · Path | Body | Response |
 |---------------|------|----------|
-| `GET /api/mixers` | — | `[ { "id": "…", "display_name": "…", "gain_db": 0.0, "muted": false, "soloed": false } ]` |
+| `GET /api/mixers` | — | `[ { "id": "…", "display_name": "…", "gain_db": 0.0, "muted": false, "pfl": false } ]` |
 | `POST /api/mixers` | `{ "name": "Channel" }` | `{ "id": "…" }` |
 | `DELETE /api/mixers/<id>` | — | `{ "ok": true }` |
 

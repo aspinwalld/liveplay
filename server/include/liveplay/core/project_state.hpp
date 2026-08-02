@@ -64,7 +64,9 @@ struct MixerChannelMeta {
     std::string           display_name;
     float                 gain_db = 0.0f;
     bool                  muted   = false;
-    bool                  soloed  = false;
+    // Was `soloed`. Solo is gone (§2.4); documents that recorded it load their
+    // value into this field and are written back as `pfl`.
+    bool                  pfl     = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,21 @@ struct BusDef {
 // Monitor is the PFL / pre-listen destination.
 inline constexpr const char* kMainBusId    = "main";
 inline constexpr const char* kMonitorBusId = "monitor";
+
+// The logical output Monitor targets unless the operator moves it. A name,
+// like every other bus output — the server's output map says which hardware
+// it means here, so a show that uses PFL is still portable.
+//
+// Deliberately not the master: PFL summing into the house is the accident
+// §2.4 exists to prevent, so Monitor is not allowed to target it at all.
+//
+// Monitor is also the pre-listen bus. The engine has always reserved the top
+// pair of master channels for DJ-style cue preview; Monitor owns that pair
+// now, and cue pre-listen routes into this strip rather than a "Preview" strip
+// of its own. So PFL'ing a bus and pre-listening a cue sum in one pair of
+// headphones, under one fader, on one meter — which is what a desk does, and
+// what §2.4 said should eventually happen to the reserved pair.
+inline constexpr const char* kMonitorOutputName = "Monitor";
 
 struct RouteSendV2 {
     audio::ChannelIndex source_channel;
@@ -436,6 +453,13 @@ public:
         BusDef                   def;
         audio::MixerChannelId    mixer;      // empty when not materialised
         std::vector<std::string> item_uuids;
+        // Live, not persisted — read from the strip. See list_buses().
+        bool                     pfl = false;
+        // Whether this bus actually reaches hardware. The UI cannot work this
+        // out from the output map alone: Monitor may be bound through
+        // settings.previewDevice, which is not in the map, and flagging that
+        // as unmapped would put a warning on a bus that is working.
+        bool                     bound = false;
     };
     std::vector<BusInfo> list_buses() const;
 
@@ -443,7 +467,12 @@ public:
     // All three write document_["buses"] so the change survives a save, and
     // touch only the affected strip so other buses keep playing.
     std::optional<BusDef> create_bus(const json& spec);
-    bool patch_bus(const std::string& id, const json& patch);
+    // Refused is distinct from NotFound because the one thing a caller may be
+    // told no about — pointing Monitor at the master — is a deliberate rule,
+    // and reporting it as "no such bus" would send whoever hit it looking for
+    // the wrong problem.
+    enum class PatchBusResult { Ok, NotFound, Refused };
+    PatchBusResult patch_bus(const std::string& id, const json& patch);
     // Refuses the system buses. Items assigned to the deleted bus fall back to
     // Main by having their busId cleared.
     bool delete_bus(const std::string& id);
@@ -453,6 +482,18 @@ public:
     // mute endpoints do. The client persists the final value with patch_bus
     // when the gesture settles.
     bool set_bus_pan_live(const std::string& id, float pan);
+
+    // ---- PFL -------------------------------------------------------------
+    // Raise or lower pre-fade listen on a bus: a pre-fader, pre-mute tap into
+    // the Monitor bus. Nothing else changes — the house mix is untouched and
+    // several buses can be PFL'd at once, which is the point of PFL over solo.
+    //
+    // Not written to the document. PFL is what the operator is listening to
+    // right now, not part of the show, so it does not survive a reload.
+    // Refused for the Monitor bus itself, which is the destination.
+    bool set_bus_pfl(const std::string& id, bool on);
+    // Drop PFL everywhere. Returns how many buses were cleared.
+    std::size_t clear_all_pfl();
 
     // Re-wire the buses an output-map edit actually moved, and only those.
     // Call after OutputMap changes: a bus already pointing at "FOH" keeps the
@@ -577,6 +618,11 @@ private:
         // actually moved, instead of interrupting every bus on the desk.
         // Empty for Master-kind buses, which do not consult the map.
         std::vector<OutputMap::Channel> wired_channels;
+        // The Monitor bus sits on the master pair the engine reserves at the
+        // top of the bus, not on one drawn from the pool. Flagged so unwiring
+        // releases the routing without handing that pair out to a bus that
+        // would then be sharing the operator's headphones.
+        bool                      reserved_pair = false;
     };
     std::unordered_map<std::string, BusRouting> bus_routings_;
 
@@ -611,6 +657,16 @@ private:
     // Connect a materialised strip to wherever its bus says it goes, reserving
     // a master pair if the destination needs one. Caller must NOT hold mutex_.
     void wire_bus(const BusDef& bus, BusRouting& routing);
+    // Monitor's own wiring: the reserved master pair, bound to whatever this
+    // machine calls the headphone output. Split out because it is the one bus
+    // whose master channels are fixed rather than allocated.
+    void wire_monitor_bus(const BusDef& bus, BusRouting& routing);
+    // Where the headphones are on this machine. The logical output map answers
+    // first — that is what keeps a show portable — and settings.previewDevice
+    // is the legacy answer every existing project already carries. Empty when
+    // neither is configured, in which case Monitor is valid and silent.
+    std::vector<OutputMap::Channel> resolve_monitor_channels(
+            const std::string& logical_name) const;
     // Re-issues just the two mixer->master sends that carry a mono bus's pan.
     // Separate from wire_bus because panning must not tear the routing down:
     // route_mixer_to_master replaces an existing send in place, so a pan drag
@@ -628,14 +684,12 @@ private:
     // Unwire and forget every per-device override routing. Caller holds mutex_.
     void release_device_routings_locked();
 
-    // Preview state. The preview infrastructure is opened lazily on first
-    // preview request, then re-used (cheaper than reopening the audio
-    // device every time the user pre-listens to a new cue).
+    // Preview state. There is no longer a preview mixer or a separately-opened
+    // preview device: pre-listen routes into the Monitor bus, which owns the
+    // reserved master pair and is wired when the project is materialised. What
+    // is left is just which cue is being auditioned.
     audio::CueId           preview_cue_;
     std::string            preview_item_uuid_;
-    audio::MixerChannelId  preview_mixer_;
-    audio::DeviceId        preview_device_;
-    std::string            preview_device_name_;   // last opened, for cleanup on change
 
     // ---- Sequencer: server-side auto-advance, crossfade, ducking restore ----
     struct DuckedEntry {

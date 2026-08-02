@@ -3,9 +3,9 @@
 // ----------------------------------------------------------------------------
 // A virtual mixer strip — Tier 2 of the engine's routing tree. Items send into
 // it; it sums per lane (kMixerLanes parallel lanes, stereo L/R), applies its
-// own gain/fade/mute/solo across all lanes, then each lane sends to one or
-// more Master output channels. The lane buffers themselves are owned by the
-// engine; the strip owns control state and per-lane meters.
+// own gain/fade/mute across all lanes, then each lane sends to one or more
+// Master output channels. The lane buffers themselves are owned by the engine;
+// the strip owns control state and per-lane meters.
 //
 // State lives in atomics so the control thread can adjust gain etc. without
 // stalling the render thread. The per-block contribution buffer is owned by
@@ -36,7 +36,19 @@ public:
     // ---- Control-thread mutators -----------------------------------------
     void set_gain_db(float db) noexcept;
     void set_mute(bool muted) noexcept;
-    void set_solo(bool soloed) noexcept;
+
+    // PFL — pre-fade listen. Replaces solo, which this engine never wired to
+    // the UI and which the mixer design rejected outright (§2.4): solo-in-place
+    // silences the room on a mis-click, PFL only adds a tap into the Monitor
+    // strip. Setting it changes no audio here; the engine reads it when it
+    // rebuilds the topology and turns it into monitor taps.
+    void set_pfl(bool on) noexcept;
+
+    // How many of the strip's lanes carry signal: 1 = mono (lane 0 only),
+    // 2 = stereo. Semantic, not structural — every strip always owns
+    // kMixerLanes lanes (§2.5). The engine needs it to place a PFL'd strip in
+    // the monitor: a mono strip tapped lane-for-lane would arrive hard left.
+    void set_width(ChannelCount w) noexcept;
 
     // Begin a smooth gain ramp toward `target_db` over `duration`. Used both
     // for explicit "fade" requests and as the universal stop transition.
@@ -57,7 +69,8 @@ public:
     void  advance_block() noexcept { advance(render_block_); }
 
     bool  is_muted() const noexcept           { return muted_.load(std::memory_order_relaxed); }
-    bool  is_soloed() const noexcept          { return soloed_.load(std::memory_order_relaxed); }
+    bool  is_pfl() const noexcept             { return pfl_.load(std::memory_order_relaxed); }
+    ChannelCount width() const noexcept       { return width_.load(std::memory_order_relaxed); }
 
     // Push one lane's block of samples (already mixed contribution from items
     // routed to this strip) into that lane's meter.
@@ -105,7 +118,8 @@ private:
     // Atomically-updated target gain (linear).
     std::atomic<float> target_gain_linear_{1.0f};
     std::atomic<bool>  muted_{false};
-    std::atomic<bool>  soloed_{false};
+    std::atomic<bool>  pfl_{false};
+    std::atomic<ChannelCount> width_{kMixerLanes};
 
     // Fade ramp parameters set by begin_fade(). Hot-read by audio thread.
     std::atomic<float>           fade_target_linear_{1.0f};

@@ -175,6 +175,18 @@ export interface Bus {
    * is not built.
    */
   pan: number;
+  /**
+   * Pre-fade listen: this bus is being tapped into Monitor, pre-fader and
+   * pre-mute. Live state rather than part of the show — it is read from the
+   * engine, never saved, and a reload clears it.
+   */
+  pfl: boolean;
+  /**
+   * Whether this bus actually reaches hardware. Not derivable from the output
+   * name list: Monitor may be bound through settings.previewDevice, which is
+   * not in the map, and the strip must not warn about a bus that is working.
+   */
+  bound: boolean;
   /** Main and Monitor: always present, cannot be deleted. */
   system: boolean;
   output: BusOutput;

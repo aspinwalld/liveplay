@@ -1609,6 +1609,11 @@ void ControlServer::install_routes() {
                         {"gainDb",   b.def.gain_db},
                         {"mute",     b.def.muted},
                         {"pan",      b.def.pan},
+                        // Live monitoring state, not part of the document —
+                        // it comes from the strip, and a reload clears it.
+                        {"pfl",      b.pfl},
+                        // Whether it actually reaches hardware — see BusInfo.
+                        {"bound",    b.bound},
                         {"system",   b.def.system},
                         {"output",   json{{"type", kind}, {"target", b.def.output_target}}},
                         {"mixerId",  b.mixer.value},
@@ -1635,8 +1640,11 @@ void ControlServer::install_routes() {
     CROW_ROUTE(app, "/api/buses/<string>").methods(crow::HTTPMethod::Patch)
         ([this](const crow::request& req, std::string id){
             try {
-                if (!state_.patch_bus(id, json::parse(req.body)))
-                    return json_err(404, "not found");
+                using PR = core::ProjectState::PatchBusResult;
+                const auto r = state_.patch_bus(id, json::parse(req.body));
+                if (r == PR::NotFound) return json_err(404, "not found");
+                if (r == PR::Refused)
+                    return json_err(409, "the Monitor bus cannot be routed to the master");
                 broadcast_doc_patch(json{
                     {"type", "doc_patch"}, {"op", "buses_patched"},
                     {"buses", state_.full_document().value("buses", json::array())},
@@ -1657,6 +1665,39 @@ void ControlServer::install_routes() {
                 if (!state_.set_bus_pan_live(id, j.value("pan", 0.0f)))
                     return json_err(404, "not found");
                 return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    // PFL — pre-fade listen. A tap into the Monitor bus, taken before the
+    // fader and before the mute, so a channel can be checked without the house
+    // hearing anything change. No document write: PFL is what the operator is
+    // listening to now, not part of the show. The broadcast is what keeps a
+    // second mixer window's buttons in step.
+    CROW_ROUTE(app, "/api/buses/pfl/clear").methods(crow::HTTPMethod::Post)
+        ([this]{
+            try {
+                const auto cleared = state_.clear_all_pfl();
+                if (cleared > 0) {
+                    broadcast_doc_patch(json{
+                        {"type", "doc_patch"}, {"op", "bus_pfl_cleared"},
+                    });
+                }
+                return json_ok(json({{"cleared", cleared}}));
+            } catch (const std::exception& e) { return json_err(500, e.what()); }
+        });
+
+    CROW_ROUTE(app, "/api/buses/<string>/pfl").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req, std::string id){
+            try {
+                auto j = json::parse(req.body);
+                const bool on = j.value("pfl", false);
+                if (!state_.set_bus_pfl(id, on))
+                    return json_err(404, "not found, or not a bus that can be PFL'd");
+                broadcast_doc_patch(json{
+                    {"type", "doc_patch"}, {"op", "bus_pfl_changed"},
+                    {"id", id}, {"pfl", on},
+                });
+                return json_ok(json({{"ok", true}, {"pfl", on}}));
             } catch (const std::exception& e) { return json_err(400, e.what()); }
         });
 
@@ -1714,7 +1755,7 @@ void ControlServer::install_routes() {
                     {"display_name", m.display_name},
                     {"gain_db",      m.gain_db},
                     {"muted",        m.muted},
-                    {"soloed",       m.soloed},
+                    {"pfl",          m.pfl},
                 });
             }
             return json_ok(arr);
@@ -3004,7 +3045,11 @@ void ControlServer::install_routes() {
             return json_ok(json({{"ok", true}, {"slot", slot}}));
         });
 
-    // ---- Preview (DJ-style pre-listening on settings.previewDevice) ----
+    // ---- Preview (DJ-style pre-listening) ----
+    // Auditions the item on the Monitor bus — the same strip PFL feeds, on the
+    // master pair reserved at the top of the bus. Where that lands is the
+    // Monitor bus's own output: the "Monitor" logical output if this machine
+    // maps one, else settings.previewDevice.
     CROW_ROUTE(app, "/api/preview").methods(crow::HTTPMethod::Get)
         ([this] {
             const auto item_uuid = state_.current_preview_item_uuid();

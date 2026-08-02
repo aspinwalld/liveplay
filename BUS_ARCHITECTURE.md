@@ -1,7 +1,7 @@
 # LivePlay — Bus Architecture
 
-> **Status:** Stages 0–2 complete on `fix/engine-config-wiring`, unmerged. Stages 3–5 not started.
-> Stage 3 (PFL + Monitor) is the next one; it is the first to touch the render loop.
+> **Status:** Stages 0–3 complete on `fix/engine-config-wiring`, unmerged. Stages 4–5 not started.
+> Stage 4 (bus → bus) is the next one, and the only one that changes the graph shape.
 > Supersedes the "Stage 3 — Bus Mixing" sketch in `IMPROVEMENTS_PLAN.md` §6, which is now
 > stale (it lists mute/solo/mixer-meters as missing; they exist).
 > Ownership-model placement follows the object-ownership model discussed in issue #46.
@@ -48,6 +48,26 @@ The client files, since they are now spread across several components:
 | `CanvasFader.vue`, `Knob.vue`, `KnobField.vue`, `MeterScale.vue` | The shared controls |
 | `utils/meterScale.ts` | The shared dB geometry and readout formatting |
 
+**Stage 3 — PFL + Monitor. Complete.** Solo is gone from the engine, replaced by PFL: a
+pre-fader, pre-mute tap into the Monitor strip, derived from a flag on the strip and carried in
+the topology as a flat list of taps. The render loop's per-block `any_soloed` scan is retired.
+Several buses can be tapped at once and the house mix never moves.
+
+**Monitor is now the preview bus.** It owns the master pair the engine has always reserved at the
+top of the bus, and cue pre-listen routes into it instead of a private "Preview" strip the mixer
+never showed. So PFL'ing a bus and auditioning a cue arrive in one pair of headphones, under one
+fader, on one meter — §2.4 said the reserved pair should eventually be absorbed this way, and it
+now is. `ProjectState` no longer owns a preview mixer or a separately-opened preview device.
+
+Monitor's hardware binding is the `"Monitor"` logical output when this machine maps one, else
+`settings.previewDevice`. It appears in the mixer as a strip pinned beside the master, not in the
+assignable rail — nothing routes *to* it.
+
+New surface: `POST /api/buses/<id>/pfl`, `POST /api/buses/pfl/clear`, `pfl` and `bound` on
+`GET /api/buses`, and a `bus_pfl_changed` / `bus_pfl_cleared` broadcast so a second mixer window
+keeps up. PFL is deliberately **not** persisted — it is what the operator is listening to now, not
+part of the show.
+
 ### 0.2 Decisions taken during implementation
 
 | Decision | Why |
@@ -75,8 +95,15 @@ The client files, since they are now spread across several components:
 | **Pan moves the two mixer→master send gains in place; it never rewires.** `POST /api/buses/<id>/pan` is live-only, `PATCH` persists on settle. | `route_mixer_to_master` replaces an existing send, so a pan drag drops no audio. Going through `unwire_bus`/`wire_bus` would release and re-acquire the master pair and re-open the device on every drag event. |
 | **A stereo bus shows its pan knob disabled** rather than hiding it. | Strips must stay the same height or the meters stop lining up across the rail. Balance is still deferred (§2.5.3). |
 | **An output-map save re-wires only the buses the edit actually moved.** `BusRouting` records what the name resolved to when it was wired; `PUT /api/outputs` re-resolves each Output-kind bus and leaves it alone unless the channels differ. | Buses are wired from the map at load, so without this a remap did nothing until the project was reloaded. Rewiring *everything* would have been the easy fix, but it drops audio on buses the edit never touched — not acceptable mid-show. A bus that failed to wire earlier records no resolution, so it compares as changed and gets retried, which is what you want right after fixing the map. |
+| **Monitor IS the preview bus** — one strip, on the reserved master pair, fed by both PFL and cue pre-listen. | They were the same thing described twice: a pre-listen destination on headphones that the house never hears. Two of them meant two strips, two device handles for one pair of phones, two levels, and a preview strip the mixer never displayed. Merged, the Monitor fader is *the* headphone level and its meter shows everything you are auditioning. |
+| **The PFL tap is pre-fader AND pre-mute.** | Pre-fader is the whole diagnostic use — hearing a channel with its fader down. Pre-mute is the same argument: checking a muted channel before unmuting it is exactly when you reach for PFL. Both fall out of tapping the accumulators before the strip pass, at no cost. |
+| **PFL is derived from a flag on the strip, not maintained as a route by the caller.** | One source of truth. Raise the flag and the next topology snapshot carries the edge; the alternative was a route table that could disagree with the button. Width lives on the strip for the same reason — the engine needs it to place a mono strip centred rather than hard left. |
+| **PFL is not persisted.** | It is what the operator is listening to right now. A project reopening with PFL latched puts signal in someone's headphones with nothing on screen to explain it. |
+| **Monitor may not target the master, at the API and in the UI** (HTTP 409, and the option is absent from its dropdown). | PFL summing into the house, live, is the accident §2.4 chose PFL over solo to make impossible. Monitor goes to hardware or nowhere. |
+| **Monitor gets no identity fallback when its output is unmapped** — unlike every other bus, which falls back to treating the name as a device. | `open_device_by_name()` falls back to the *default* device when a name matches nothing, so the fallback that keeps a migrated `deviceOverride` working would have put every PFL'd channel in the house. Unmapped Monitor is valid and silent (§7.5), and starts working the moment it is bound. |
+| **`GET /api/buses` reports `bound`.** | The client cannot work out from the output-name list whether a bus reaches hardware: Monitor is usually bound through `settings.previewDevice`, which is not in the map at all, so inferring it put an "unmapped" warning on the one bus most likely to be working. |
 
-### 0.2b Bugs found while building Stage 2
+### 0.2b Bugs found while building Stages 2 and 3
 
 Each of these was reported as a UI symptom and turned out to be something else. Recorded because
 the symptom is misleading in every case.
@@ -87,15 +114,18 @@ the symptom is misleading in every case.
 | Cart items created in a detached window vanished on reattach, until restart | A detached window runs without the sync watchers, so nothing pushed the new item; the main window then pushed its own older copy back over IPC and the cart window cleared and repopulated from it. Detached windows now publish new items through the targeted endpoints and never author a whole-document save. |
 | Dynamics appearing beside the plugin rack instead of at the top of its column | The short-window breakpoint dropped explicit grid *rows* but kept explicit *columns*, handing placement to auto-flow — whose cursor never moves backwards. |
 | The window minimum "not working" (measured 1266x706 against a 1280x768 setting) | It was working. Electron's minimums describe the outer window unless `useContentSize` is set; the frame eats 14 and 62 on Windows. Every breakpoint and `vh` in this layout measures the page, so the floor now uses `useContentSize`. |
+| **PFL arriving in the house** — the master read 5 dB hot the moment PFL went up | Two separate causes, both found by metering the master with PFL raised, neither visible from the code. (1) `ensure_default_routing()` took `mixers_.begin()` — an arbitrary strip out of an `unordered_map` — as "the Main mixer" and wired it to masters 0/1; sometimes that was the Monitor strip. It now skips the monitor and prefers a strip actually named Main. (2) An unmapped Monitor fell through the identity fallback to `open_device_by_name()`, which returns the *default* device on no match. Both are in the e2e harness as assertions, and both were confirmed to fail without the fix. |
+| Repeat runs of the e2e harness disagreeing with the first | Two real leaks plus one bad assertion. `materialise_buses()` cleared the free master-pair pool without rewinding the allocator, so every project load abandoned its pairs and walked the counter towards the preview reserve. `rewire_buses_for_output_map()` compared Monitor against the plain output map, which never matches a binding that came from `settings.previewDevice`, so every save tore the headphone feed down and rebuilt it. And "the house level" was maxing over *every* master channel, which stopped meaning the house the moment Monitor was mapped — the reserved pair is a master channel too. |
 
 ### 0.3 Not done
 
-- **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
 - **Stage 4 — bus → bus.** A bus targeting another bus is accepted, warns, and stays silent.
-- **Stage 5 — inserts.** Insert slots, PFL and the EQ/Dynamics panels in the channel view are
-  laid-out shells with disabled controls.
-- **`previewDevice` / `ltcDevice` are still device names in the project** — same portability
-  problem `defaultOutputDevice` had, untouched because they are separate features.
+- **Stage 5 — inserts.** Insert slots and the EQ/Dynamics panels in the channel view are
+  laid-out shells with disabled controls. (PFL is real as of Stage 3.)
+- **`previewDevice` is still a device name in the project**, now as the fallback binding for the
+  Monitor bus. The portable path exists — map `"Monitor"` in the output map and it wins — but the
+  legacy field is still honoured, because dropping it would silently take pre-listen away from
+  every project that has one configured. `ltcDevice` is untouched, being a separate feature.
 - **Global master gain has no UI** (see above). A true master fader distinct from output trim is a
   real thing a desk has; needs a decision.
 - **Balance for stereo buses** (§2.5.3). The knob is there and disabled; pan on mono buses is
@@ -104,10 +134,25 @@ the symptom is misleading in every case.
   identically, but it means the mixer cannot be driven without a pointer.
 - **The EQ band handles are not draggable.** With no EQ behind them there is nothing to drag to;
   they are position markers on a flat curve. Making them live is Stage 5.
+- **The Monitor strip has no dedicated "what am I listening to" readout.** It meters the sum of
+  PFL and pre-listen, which is correct, but with three buses tapped there is nothing naming them
+  except three lit PFL buttons and the count on the clear control.
 - **Nothing on this branch has been driven through the GUI by me** — no browser driver is present
   and I did not add one. Every UI change was verified by build plus reasoning, and by the
-  maintainer testing manually. The server work *is* verified: unit tests plus a live instance
-  driven over REST and WebSocket.
+  maintainer testing manually.
+
+The **server** work is verified properly, and Stage 3 more thoroughly than the rest:
+
+- Unit tests (`liveplay-mixer-tests`) cover PFL state on the strip, width clamping, and the
+  monitor-tap arithmetic — which lane a tapped strip lands in, at what gain, that taps sum, and
+  that the monitor never taps itself. `mix_monitor_taps` lives in its own header so it can be
+  called without opening an audio device.
+- `server/tests/e2e/pfl-e2e.js` drives a live server over REST and WebSocket with real audio
+  through the real render loop, asserting the behavioural claims: pre-fader, pre-mute, the house
+  never moving, mono arriving centred, PFL and pre-listen summing, and an unbound Monitor driving
+  no hardware at all. It found two ways for PFL to reach the house that reading the code did not.
+- Every safety assertion was confirmed to **fail** against a deliberately broken build before
+  being trusted.
 
 ---
 

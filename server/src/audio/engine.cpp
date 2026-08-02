@@ -214,6 +214,21 @@ void AudioEngine::rebuild_topology_locked() {
         }
     }
 
+    // ---- Monitor + PFL taps ----
+    // PFL is state on the strip, not a route the caller has to maintain, so
+    // the tap list is derived here rather than stored. That keeps one source
+    // of truth: raise the flag, and the next snapshot carries the edge.
+    if (!monitor_mixer_.empty()) {
+        auto mon = mixers_.find(monitor_mixer_.value);
+        if (mon != mixers_.end()) {
+            snap->monitor = mon->second;
+            for (const auto& [id_str, m] : mixers_) {
+                if (!m->is_pfl() || id_str == monitor_mixer_.value) continue;
+                append_monitor_taps(snap->monitor_taps, m);
+            }
+        }
+    }
+
     publish_topology(std::move(snap));
 }
 
@@ -585,7 +600,19 @@ void AudioEngine::ensure_default_routing() {
     MixerChannelId main_mixer{};
     {
         std::lock_guard lock{mutex_};
-        if (!mixers_.empty()) main_mixer = mixers_.begin()->second->id();
+        // Never the monitor, and prefer a strip actually called Main.
+        //
+        // This used to take mixers_.begin(), which is an arbitrary strip out
+        // of an unordered_map — and once Monitor existed, it sometimes picked
+        // that one and wired it to masters 0/1. Everything PFL'd then arrived
+        // in the house, at roughly one launch in N, which is the precise
+        // accident PFL was chosen over solo to make impossible. Caught by
+        // metering the master with PFL up.
+        for (const auto& [_, m] : mixers_) {
+            if (!monitor_mixer_.empty() && m->id() == monitor_mixer_) continue;
+            if (main_mixer.empty()) main_mixer = m->id();
+            if (m->display_name() == "Main") { main_mixer = m->id(); break; }
+        }
     }
     if (main_mixer.empty()) {
         main_mixer = create_mixer_channel("Main");
@@ -699,16 +726,79 @@ std::vector<AudioEngine::MixerChannelInfo> AudioEngine::list_mixer_channels() co
             m->display_name(),
             linear_to_db_precise(m->peek_gain_linear()),
             m->is_muted(),
-            m->is_soloed(),
+            m->is_pfl(),
         });
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// PFL / Monitor
+// ---------------------------------------------------------------------------
+void AudioEngine::set_monitor_mixer(const MixerChannelId& id) {
+    std::lock_guard lock{mutex_};
+    if (monitor_mixer_ == id) return;
+    monitor_mixer_ = id;
+    rebuild_topology_locked();
+}
+
+MixerChannelId AudioEngine::monitor_mixer() const {
+    std::lock_guard lock{mutex_};
+    return monitor_mixer_;
+}
+
+void AudioEngine::set_mixer_pfl(const MixerChannelId& id, bool on) {
+    std::lock_guard lock{mutex_};
+    if (on && id == monitor_mixer_) {
+        Logger::warn("set_mixer_pfl: refusing PFL on the monitor strip itself");
+        return;
+    }
+    auto it = mixers_.find(id.value);
+    if (it == mixers_.end()) return;
+    if (it->second->is_pfl() == on) return;
+    it->second->set_pfl(on);
+    // The tap list lives in the topology, so a flag change needs a new
+    // snapshot. Same cost as any other routing change, at user rate.
+    rebuild_topology_locked();
+}
+
+std::size_t AudioEngine::clear_all_pfl() {
+    std::lock_guard lock{mutex_};
+    std::size_t cleared = 0;
+    for (auto& [_, m] : mixers_) {
+        if (!m->is_pfl()) continue;
+        m->set_pfl(false);
+        ++cleared;
+    }
+    if (cleared > 0) rebuild_topology_locked();
+    return cleared;
+}
+
+std::size_t AudioEngine::pfl_count() const {
+    std::lock_guard lock{mutex_};
+    std::size_t n = 0;
+    for (const auto& [_, m] : mixers_) if (m->is_pfl()) ++n;
+    return n;
+}
+
+void AudioEngine::set_mixer_width(const MixerChannelId& id, ChannelCount width) {
+    std::lock_guard lock{mutex_};
+    auto it = mixers_.find(id.value);
+    if (it == mixers_.end()) return;
+    if (it->second->width() == width) return;
+    it->second->set_width(width);
+    // Width decides how a PFL'd strip is placed in the monitor, so a strip
+    // that is currently tapped needs its taps rebuilt.
+    if (it->second->is_pfl()) rebuild_topology_locked();
 }
 
 void AudioEngine::remove_mixer_channel(const MixerChannelId& id) {
     std::lock_guard lock{mutex_};
     mixers_.erase(id.value);
     pending_.mixer_to_master.erase(id.value);
+    // A dangling monitor designation would survive a project reload and point
+    // at a strip that no longer exists, quietly disabling PFL.
+    if (monitor_mixer_ == id) monitor_mixer_ = MixerChannelId{};
     for (auto& [_, item_routes] : pending_.item_sources) {
         for (auto& sends : item_routes.by_source_channel) {
             sends.erase(std::remove_if(sends.begin(), sends.end(),
@@ -1097,10 +1187,28 @@ void AudioEngine::render_one_block(const Topology& topo) {
         }
     }
 
-    // ---- Tier-2 strip processing (gain/mute/solo/fade) + meter ----
-    bool any_soloed = false;
-    for (auto& m : active_mixers) if (m->is_soloed()) { any_soloed = true; break; }
+    // ---- PFL taps into the Monitor strip ----
+    // Placed here, between the item pass and the strip pass, which is what
+    // makes the tap pre-fader and pre-mute: the accumulators still hold the
+    // raw sum of what feeds each bus. Monitor is a strip like any other, so
+    // the pass below then applies its own fader and mute to the result —
+    // that fader is the headphone level.
+    //
+    // Nothing is copied. The tap adds straight into the monitor's
+    // accumulator, which is the buffer copy §2.4 costed, minus the copy.
+    if (topo.monitor && !topo.monitor_taps.empty()) {
+        const auto mon = mixer_index.find(topo.monitor->id().value);
+        if (mon != mixer_index.end()) {
+            mix_monitor_taps(mon->second, topo.monitor_taps, mixer_index,
+                             mixer_accumulators_, block);
+        }
+    }
 
+    // ---- Tier-2 strip processing (gain/mute/fade) + meter ----
+    // No solo scan. Solo was never reachable from the UI and the mixer design
+    // replaced it with PFL outright (§2.4), which costs the render thread a
+    // flat list of taps instead of a per-block scan of every strip plus a
+    // per-strip audibility test that depended on all the others.
     for (std::size_t i = 0; i < active_mixers.size(); ++i) {
         auto& m = active_mixers[i];
         // Advance the strip's fade envelope by exactly one render block, then
@@ -1108,9 +1216,8 @@ void AudioEngine::render_one_block(const Topology& topo) {
         // the read may be repeated (metering, gain application) without the
         // fade running at a multiple of its configured speed.
         m->advance_block();
-        const float gain_lin = m->peek_gain_linear();
-        const bool  audible  = !m->is_muted() && (!any_soloed || m->is_soloed());
-        const float effective = audible ? gain_lin : 0.0f;
+        const float gain_lin  = m->peek_gain_linear();
+        const float effective = m->is_muted() ? 0.0f : gain_lin;
         for (ChannelIndex lane = 0; lane < kMixerLanes; ++lane) {
             Sample* buf = mixer_accumulators_[i * kMixerLanes + lane].data();
             for (std::size_t s = 0; s < block; ++s) buf[s] *= effective;

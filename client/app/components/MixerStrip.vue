@@ -46,7 +46,10 @@
         @click.stop
         @change="onOutputChange"
       >
-        <option value="master">{{ t('mixer.toMaster') }}</option>
+        <!-- Monitor is offered no route to the master. It carries PFL, and
+             PFL summed into the house is the accident this whole scheme was
+             chosen to make impossible; the server refuses it too. -->
+        <option v-if="!monitor" value="master">{{ t('mixer.toMaster') }}</option>
         <option
           v-for="o in outputNames"
           :key="'out:' + o"
@@ -91,7 +94,11 @@
       <span class="strip__panlabel">{{ panLabel }}</span>
     </div>
 
-    <!-- Mute / PFL -->
+    <!-- Mute / PFL.
+         PFL adds a pre-fader, pre-mute tap into the Monitor bus and changes
+         nothing about what the room hears — several can be up at once. The
+         master has no PFL (it is what you are already listening to) and
+         neither does Monitor (it is the destination). -->
     <div class="strip__row strip__row--split">
       <button
         class="strip__btn"
@@ -101,9 +108,10 @@
       >{{ t('mixer.mute') }}</button>
       <button
         class="strip__btn"
-        :class="{ 'strip__btn--pfl': pfl }"
-        :title="t('mixer.pflComingSoon')"
-        disabled
+        :class="{ 'strip__btn--pfl': bus.pfl }"
+        :disabled="master || monitor"
+        :title="master || monitor ? '' : t('mixer.pflHint')"
+        @click.stop="onPfl"
       >{{ t('mixer.pfl') }}</button>
     </div>
 
@@ -158,7 +166,11 @@
     <div class="strip__gain">{{ gainLabel }}</div>
 
     <!-- Scribble strip. Double-click to rename, as on a desk. -->
-    <div class="strip__name" :title="renaming ? '' : bus.name + ' — ' + t('mixer.renameHint')">
+    <div
+      class="strip__name"
+      :title="monitor ? t('mixer.monitorHint')
+                      : (renaming ? '' : bus.name + ' — ' + t('mixer.renameHint'))"
+    >
       <span class="strip__chip" :style="{ background: bus.color || 'var(--color-accent)' }"></span>
       <input
         v-if="renaming"
@@ -199,13 +211,17 @@ const props = defineProps<{
   touch?: boolean;
   /** Logical output names this machine knows about. */
   outputNames: string[];
-  /** PFL is engine work that hasn't landed; the control is shown disabled. */
-  pfl?: boolean;
   /**
    * Render as the master strip: meters the output pair, drives output-channel
    * gain, and blanks the rows that only mean something for a bus.
    */
   master?: boolean;
+  /**
+   * Render as the Monitor strip: a real bus with a real fader (it is the
+   * headphone level), but the destination of PFL rather than a source of it,
+   * and never routable to the master.
+   */
+  monitor?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -312,6 +328,13 @@ function onMute() {
   emit('patch', props.bus.id, { mute: next });
 }
 
+// PFL is engine-only state — no document write, nothing to persist, so it goes
+// straight to the server rather than through the patch path the fader uses.
+function onPfl() {
+  if (props.master || props.monitor) return;
+  void server.setBusPfl(props.bus.id, !props.bus.pfl).catch(() => {});
+}
+
 // Width moved to the channel details view; the strip just reports it, next to
 // the button that opens the place it can be changed.
 const widthLabel = computed(() => props.bus.width >= 2 ? 'ST' : 'MONO');
@@ -356,14 +379,25 @@ const outputValue = computed(() => {
   return o.type === 'output' ? 'out:' + o.target : 'master';
 });
 
-// A bus pointing at a name this machine has no mapping for still plays (the
-// name is treated as a device) but should look different from a healthy one.
+// Whether this bus reaches hardware — answered by the server, not inferred
+// from the name list. Monitor is usually bound through settings.previewDevice,
+// which is not in the output map at all, so inferring it here put a warning on
+// the one bus most likely to be working.
 const outputUnmapped = computed(() =>
-  props.bus.output.type === 'output' && !props.outputNames.includes(props.bus.output.target));
+  props.bus.output.type === 'output' && props.bus.bound === false);
 
 const outputTitle = computed(() => {
   if (props.bus.output.type === 'bus') return t('mixer.busToBusUnsupported');
-  if (outputUnmapped.value) return t('mixer.outputUnmapped', { name: props.bus.output.target });
+  // Unmapped means something different on Monitor. Every other bus falls back
+  // to treating the name as a device and usually still plays; Monitor's
+  // default name matches no device, so unmapped means PFL is inaudible — a
+  // thing worth saying outright rather than leaving the operator to work out
+  // why pressing PFL does nothing.
+  if (outputUnmapped.value) {
+    return props.monitor
+      ? t('mixer.monitorUnmapped')
+      : t('mixer.outputUnmapped', { name: props.bus.output.target });
+  }
   return t('mixer.output');
 });
 

@@ -16,11 +16,20 @@
 //   4. begin_fade is pure     — arming a fade from the control thread doesn't
 //                               consume a block of the previous one
 //   5. Zero-length fade       — applies immediately
+//
+// Also covers the pan law and, since Stage 3, PFL state on the strip: the flag
+// the engine turns into monitor taps, and the width that decides where a
+// tapped strip lands in the monitor.
 // ============================================================================
 #include "liveplay/audio/mixer_channel.hpp"
+#include "liveplay/audio/monitor_tap.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
+#include <unordered_map>
+#include <vector>
 
 using namespace liveplay::audio;
 
@@ -170,6 +179,149 @@ void test_pan_law() {
     check_near("pan: clamps above +1", pan_gains_db(4.0f).right, 0.0, 1e-4);
 }
 
+// ---------------------------------------------------------------------------
+// PFL state on the strip (§2.4). The tap itself lives in the render loop and
+// is verified against a running server; what is checkable here is the state
+// the engine derives those taps from, and the gain a centred mono tap uses.
+void test_pfl_state() {
+    MAKE_CHANNEL(m);
+    check_true("pfl: off by default",            !m.is_pfl());
+    m.set_pfl(true);
+    check_true("pfl: reads back",                m.is_pfl());
+    // PFL must not touch the audio path here — the strip's own gain is the
+    // house level, and PFL is a separate tap taken before it.
+    check_near("pfl: does not move the strip gain", m.peek_gain_linear(), 1.0, 1e-6);
+    m.set_mute(true);
+    check_true("pfl: survives mute",             m.is_pfl());
+    m.set_pfl(false);
+    check_true("pfl: clears",                    !m.is_pfl());
+
+    check_true("width: stereo by default",       m.width() == kMixerLanes);
+    m.set_width(1);
+    check_true("width: mono reads back",         m.width() == 1);
+    // Out of range must clamp: the strip only owns kMixerLanes lanes, and a
+    // wider value would have the engine tapping a lane that isn't there.
+    m.set_width(7);
+    check_true("width: clamps to the lane count", m.width() == kMixerLanes);
+    m.set_width(0);
+    check_true("width: clamps up to mono",       m.width() == 1);
+}
+
+// A mono strip is PFL'd into both monitor lanes at the downmix constant, and
+// a mono bus is panned into a stereo destination by the pan law. Those are two
+// different code paths that have to land a mono source at the same level, or
+// PFL'ing a channel would change how loud it seems relative to the house.
+void test_pfl_centre_matches_pan_centre() {
+    const double tap = kDefaultDownmixDb;
+    const double pan = pan_gains_db(0.0f).left;
+    check_near("pfl: mono tap gain matches pan centre", tap - pan, 0.0, 0.02);
+}
+
+// ---------------------------------------------------------------------------
+// The monitor mix itself: which lane a tapped strip lands in, at what level,
+// and that several taps sum rather than replace one another.
+//
+// This is the arithmetic the render loop runs. It is exercised directly, on
+// the same function the engine calls, because everything around it in that
+// loop needs an open audio device and this is the part with a rule in it.
+namespace {
+// Two strips plus the monitor, laid out exactly as the render thread lays out
+// its accumulators: [strip_index * kMixerLanes + lane].
+struct Bench {
+    std::shared_ptr<MixerChannel> a, b, monitor;
+    std::unordered_map<std::string, std::size_t> index;
+    std::vector<std::vector<Sample>> lanes;
+    static constexpr std::size_t kBlockN = 8;
+
+    Bench() {
+        a       = std::make_shared<MixerChannel>(MixerChannelId{"a"}, "A");
+        b       = std::make_shared<MixerChannel>(MixerChannelId{"b"}, "B");
+        monitor = std::make_shared<MixerChannel>(MixerChannelId{"mon"}, "Monitor");
+        index = {{"a", 0}, {"b", 1}, {"mon", 2}};
+        lanes.assign(3 * kMixerLanes, std::vector<Sample>(kBlockN, 0.0f));
+    }
+    void fill(std::size_t strip, ChannelIndex lane, Sample v) {
+        auto& buf = lanes[strip * kMixerLanes + lane];
+        std::fill(buf.begin(), buf.end(), v);
+    }
+    Sample mon(ChannelIndex lane) const { return lanes[2 * kMixerLanes + lane][0]; }
+};
+} // namespace
+
+void test_monitor_tap_mix() {
+    // ---- A stereo strip lands lane-for-lane at unity ----
+    {
+        Bench bench;
+        bench.a->set_width(2);
+        bench.fill(0, 0, 0.25f);
+        bench.fill(0, 1, 0.5f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        check_true("tap: a stereo strip contributes two taps", taps.size() == 2);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_near("tap: stereo L arrives on monitor L at unity", bench.mon(0), 0.25, 1e-6);
+        check_near("tap: stereo R arrives on monitor R at unity", bench.mon(1), 0.5,  1e-6);
+    }
+
+    // ---- A mono strip is centred, not hard left ----
+    {
+        Bench bench;
+        bench.a->set_width(1);
+        bench.fill(0, 0, 1.0f);   // lane 1 stays silent, as a mono strip's does
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        const double expect = std::pow(10.0, kDefaultDownmixDb / 20.0);
+        check_near("tap: mono arrives on monitor L at the centre gain",
+                   bench.mon(0), expect, 1e-4);
+        check_near("tap: mono arrives on monitor R at the centre gain",
+                   bench.mon(1), expect, 1e-4);
+        check_near("tap: mono is centred (L equals R)",
+                   bench.mon(0) - bench.mon(1), 0.0, 1e-9);
+    }
+
+    // ---- Taps sum. PFL is additive; that is why it needs a clear-all ----
+    {
+        Bench bench;
+        bench.a->set_width(2);
+        bench.b->set_width(2);
+        bench.fill(0, 0, 0.2f);
+        bench.fill(1, 0, 0.3f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        append_monitor_taps(taps, bench.b);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_near("tap: two PFL'd strips sum in the monitor", bench.mon(0), 0.5, 1e-6);
+    }
+
+    // ---- The monitor never taps itself ----
+    {
+        Bench bench;
+        bench.monitor->set_width(2);
+        bench.fill(2, 0, 0.4f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.monitor);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_near("tap: the monitor does not feed itself", bench.mon(0), 0.4, 1e-6);
+    }
+
+    // ---- A strip that is no longer live is skipped, not dereferenced ----
+    {
+        Bench bench;
+        auto gone = std::make_shared<MixerChannel>(MixerChannelId{"gone"}, "Gone");
+        gone->set_width(2);
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, gone);       // never in the index
+        taps.push_back({nullptr, 0, 0, 1.0f}); // and one outright null
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_near("tap: a removed strip contributes nothing", bench.mon(0), 0.0, 1e-9);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -180,6 +332,9 @@ int main() {
     test_begin_fade_does_not_consume_a_block();
     test_zero_length_fade();
     test_pan_law();
+    test_pfl_state();
+    test_pfl_centre_matches_pan_centre();
+    test_monitor_tap_mix();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES",
                 g_failures, g_failures == 1 ? "" : "s");

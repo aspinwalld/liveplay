@@ -65,7 +65,12 @@
       <button class="cf__btn" :class="{ 'cf__btn--mute': bus.mute }" @click="onMute">
         {{ t('mixer.mute') }}
       </button>
-      <button class="cf__btn" disabled :title="t('mixer.pflComingSoon')">{{ t('mixer.pfl') }}</button>
+      <button
+        class="cf__btn"
+        :class="{ 'cf__btn--pfl': bus.pfl }"
+        :title="t('mixer.pflHint')"
+        @click="onPfl"
+      >{{ t('mixer.pfl') }}</button>
     </div>
 
     <!-- Filters. Shells until the DSP chain exists — dashed, and labelled, so
@@ -182,6 +187,13 @@ function onMute() {
   emit('patch', props.bus.id, { mute: next });
 }
 
+// Pre-fade listen: a tap into Monitor, taken before this fader and before the
+// mute above it. Engine-only state, so nothing is persisted and there is no
+// document round-trip to wait for.
+function onPfl() {
+  void server.setBusPfl(props.bus.id, !props.bus.pfl).catch(() => {});
+}
+
 const gainLabel = computed(() =>
   gainDb.value <= -60 ? '-∞' : (gainDb.value > 0 ? '+' : '') + gainDb.value.toFixed(1));
 
@@ -286,6 +298,7 @@ const meterLabel = computed(() => {
   cursor: pointer;
 }
 .cf__btn--mute { background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
+.cf__btn--pfl  { background: var(--color-success); border-color: var(--color-success); color: #fff; }
 .cf__btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .cf__filters {

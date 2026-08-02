@@ -31,6 +31,7 @@
 #include "liveplay/audio/limiter.hpp"
 #include "liveplay/audio/meter.hpp"
 #include "liveplay/audio/mixer_channel.hpp"
+#include "liveplay/audio/monitor_tap.hpp"
 #include "liveplay/audio/playback_item.hpp"
 #include "liveplay/audio/types.hpp"
 
@@ -163,6 +164,10 @@ struct MasterRouteEntry {
 struct Topology {
     std::vector<ItemRouteEntry>   items;     // all known items (active list filtered at render time)
     std::vector<MasterRouteEntry> masters;   // size == master_channels
+    // The Monitor strip and what PFL is feeding it. Null when no strip has
+    // been designated as the monitor, in which case PFL does nothing.
+    std::shared_ptr<MixerChannel> monitor;
+    std::vector<MonitorTap>       monitor_taps;
 };
 
 // ---------------------------------------------------------------------------
@@ -247,9 +252,38 @@ public:
         std::string    display_name;
         float          gain_db;
         bool           muted;
-        bool           soloed;
+        bool           pfl;
     };
     std::vector<MixerChannelInfo> list_mixer_channels() const;
+
+    // ---- PFL / Monitor ---------------------------------------------------
+    // Nominate the strip that PFL feeds. Until one is set, PFL is inert — the
+    // flag can be raised on any strip and nothing is tapped anywhere. Passing
+    // an empty id clears the designation.
+    void set_monitor_mixer(const MixerChannelId& id);
+    MixerChannelId monitor_mixer() const;
+
+    // Raise or lower PFL on a strip. The tap is PRE-FADER and PRE-MUTE: the
+    // whole diagnostic use is hearing a channel whose fader is down or whose
+    // mute is engaged, and a PFL that went quiet with the fader would answer
+    // the wrong question. The house mix is untouched either way — that is the
+    // difference between this and solo.
+    //
+    // Setting PFL on the monitor strip itself is refused; it would feed
+    // itself, which is an accumulating loop rather than a signal path.
+    void set_mixer_pfl(const MixerChannelId& id, bool on);
+
+    // Drop PFL on every strip. One control for "get this out of my
+    // headphones", which matters because PFL is additive and easy to leave up.
+    // Returns how many strips were cleared.
+    std::size_t clear_all_pfl();
+
+    // How many strips currently have PFL raised.
+    std::size_t pfl_count() const;
+
+    // Declare a strip mono or stereo. Governs how PFL places it in the
+    // monitor: a mono strip is centred rather than tapped lane-for-lane.
+    void set_mixer_width(const MixerChannelId& id, ChannelCount width);
 
     // ---- Routing matrix --------------------------------------------------
     // `lane` selects which mixer strip lane the source channel feeds
@@ -393,6 +427,10 @@ private:
         std::vector<std::optional<MasterDestination>> master_destinations;
     };
     PendingRoute pending_;
+
+    // Which strip PFL feeds. Guarded by mutex_; the render thread reads the
+    // resolved strip out of the topology snapshot instead.
+    MixerChannelId monitor_mixer_;
 
     // Atomic topology snapshot for the render thread.
     detail::AtomicSharedPtr<const Topology> topology_{};

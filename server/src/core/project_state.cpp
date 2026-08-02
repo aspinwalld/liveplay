@@ -395,7 +395,7 @@ void to_json(json& j, const MixerChannelMeta& m) {
         {"display_name", m.display_name},
         {"gain_db",      m.gain_db},
         {"muted",        m.muted},
-        {"soloed",       m.soloed},
+        {"pfl",          m.pfl},
     };
 }
 
@@ -495,15 +495,11 @@ ProjectState::~ProjectState() {
 
     // Tear down preview infrastructure on shutdown so the audio device gets
     // released cleanly.
+    // The strip and the device belong to the Monitor bus now, and are torn
+    // down with every other bus routing; only the auditioned cue is ours.
     if (!preview_cue_.empty()) {
         engine_.stop(preview_cue_);
         engine_.unload_cue(preview_cue_);
-    }
-    if (!preview_mixer_.empty()) {
-        engine_.remove_mixer_channel(preview_mixer_);
-    }
-    if (!preview_device_.empty()) {
-        engine_.close_device(preview_device_);
     }
 }
 
@@ -1538,8 +1534,13 @@ void ProjectState::apply_default_device_routing() {
 }
 
 // ---------------------------------------------------------------------------
-// Preview device change — tear down any active preview so the next call to
-// start_preview() opens a fresh connection to the newly selected device.
+// Preview device change — stop what is being auditioned and move the Monitor
+// bus to the newly selected hardware.
+//
+// Pre-listen and PFL share that bus, so this setting now moves both. It is
+// re-wired here rather than left for the next start_preview(), because PFL can
+// be up with nothing being auditioned at all: waiting would leave the operator
+// listening to the old device with no obvious way to say so.
 // ---------------------------------------------------------------------------
 void ProjectState::apply_preview_device_change() {
     audio::CueId prev_cue;
@@ -1548,11 +1549,30 @@ void ProjectState::apply_preview_device_change() {
         prev_cue = preview_cue_;
         preview_cue_ = audio::CueId{};
         preview_item_uuid_.clear();
-        preview_device_name_.clear();
     }
     if (!prev_cue.empty()) {
         engine_.stop(prev_cue);
         engine_.unload_cue(prev_cue);
+    }
+
+    BusDef     def;
+    BusRouting routing;
+    {
+        std::lock_guard lock{mutex_};
+        const auto bit = std::find_if(buses_.begin(), buses_.end(),
+                                      [](const BusDef& b) { return b.id == kMonitorBusId; });
+        if (bit == buses_.end()) return;
+        def = *bit;
+        const auto rit = bus_routings_.find(kMonitorBusId);
+        if (rit == bus_routings_.end()) return;
+        routing = rit->second;
+    }
+    if (routing.mixer.empty()) return;
+    unwire_bus(routing);
+    wire_bus(def, routing);
+    {
+        std::lock_guard lock{mutex_};
+        bus_routings_[kMonitorBusId] = routing;
     }
 }
 
@@ -3544,9 +3564,9 @@ void ProjectState::load_buses_locked() {
     // Main and Monitor always exist. A document that already defines them
     // keeps its levels; one that doesn't gets them synthesised, which is what
     // makes every pre-bus project load unchanged.
-    const auto ensure_system = [&](const char* id, const char* name, int order) {
+    const auto ensure_system = [&](const char* id, const char* name, int order) -> BusDef& {
         for (auto& b : buses_) {
-            if (b.id == id) { b.system = true; return; }
+            if (b.id == id) { b.system = true; return b; }
         }
         BusDef d;
         d.id           = id;
@@ -3554,9 +3574,22 @@ void ProjectState::load_buses_locked() {
         d.order        = order;
         d.system       = true;
         buses_.push_back(std::move(d));
+        return buses_.back();
     };
-    ensure_system(kMainBusId,    "Main",    0);
-    ensure_system(kMonitorBusId, "Monitor", 1'000'000);
+    ensure_system(kMainBusId, "Main", 0);
+
+    // Monitor is where PFL lands, so it must not be pointed at the master —
+    // that would put every PFL'd channel into the house mix, live. A document
+    // written before PFL existed has Monitor on the master kind by default
+    // (nothing fed it, so it was harmless); moving it here is lossless and
+    // silent, because an unmapped output name resolves to no channels.
+    {
+        BusDef& mon = ensure_system(kMonitorBusId, "Monitor", 1'000'000);
+        if (mon.output_kind == BusOutputKind::Master) {
+            mon.output_kind   = BusOutputKind::Output;
+            mon.output_target = kMonitorOutputName;
+        }
+    }
 
     // A project that named a default output device gets it moved onto Main,
     // as a logical output. Because an unmapped name resolves back to a device
@@ -3695,7 +3728,17 @@ void ProjectState::release_master_pair_locked(audio::MasterChannelIndex l) {
 void ProjectState::unwire_bus(BusRouting& routing) {
     if (routing.mixer.empty()) return;
     routing.wired_channels.clear();
-    if (routing.has_masters) {
+    if (routing.reserved_pair) {
+        // Monitor's pair comes back off the strip and the device, but never
+        // goes into the pool — it belongs to the headphone output, and handing
+        // it to the next direct-out bus would put that bus in the operator's
+        // ears.
+        engine_.unroute_mixer_from_master(routing.mixer, routing.master_l);
+        engine_.unroute_mixer_from_master(routing.mixer, routing.master_r);
+        engine_.clear_master_assignment(routing.master_l);
+        engine_.clear_master_assignment(routing.master_r);
+        routing.reserved_pair = false;
+    } else if (routing.has_masters) {
         engine_.unroute_mixer_from_master(routing.mixer, routing.master_l);
         engine_.unroute_mixer_from_master(routing.mixer, routing.master_r);
         engine_.clear_master_assignment(routing.master_l);
@@ -3742,7 +3785,15 @@ std::size_t ProjectState::rewire_buses_for_output_map() {
         // A bus that failed to wire earlier has no recorded resolution, so it
         // compares as changed and gets a retry — which is what you want after
         // the operator has just fixed the map.
-        if (same(outputs_.resolve(bus.output_target), it->second.wired_channels)) continue;
+        //
+        // Monitor is asked the same way it was wired. Comparing it against the
+        // plain map would use the identity fallback, which never matches a
+        // binding that came from settings.previewDevice — so every save of the
+        // output map tore down the headphone feed and built it again.
+        const auto resolved = bus.id == kMonitorBusId
+                                  ? resolve_monitor_channels(bus.output_target)
+                                  : outputs_.resolve(bus.output_target);
+        if (same(resolved, it->second.wired_channels)) continue;
 
         BusRouting routing = it->second;
         unwire_bus(routing);
@@ -3823,6 +3874,13 @@ void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
         return;
     }
 
+    // Monitor is wired differently enough to be its own function: fixed master
+    // pair, and a hardware binding that falls back to settings.previewDevice.
+    if (bus.id == kMonitorBusId) {
+        wire_monitor_bus(bus, routing);
+        return;
+    }
+
     // What "FOH" means on this machine. Unmapped names fall back to being
     // treated as a device name, which keeps a fresh install working with no
     // configuration and lets legacy device overrides migrate unchanged.
@@ -3879,6 +3937,88 @@ void ProjectState::wire_bus(const BusDef& bus, BusRouting& routing) {
                  outputs_.has(bus.output_target) ? "" : ", unmapped: name used as device");
 }
 
+std::vector<OutputMap::Channel> ProjectState::resolve_monitor_channels(
+        const std::string& logical_name) const {
+    // A real mapping wins. That is the portable answer, and the one the rest
+    // of this branch is moving everything towards.
+    if (outputs_.has(logical_name)) return outputs_.resolve(logical_name);
+
+    // Otherwise the project's own preview device, which is where pre-listen
+    // has always gone and what every existing project already carries. It is
+    // a device name in the document — the portability problem §0.3 lists —
+    // but dropping it would silently take pre-listen away from every user who
+    // has one configured, which is a worse trade than keeping the field alive
+    // until it is migrated deliberately.
+    std::string device;
+    {
+        std::lock_guard lock{mutex_};
+        if (document_.contains("settings") && document_["settings"].is_object()) {
+            const auto& s = document_["settings"];
+            if (s.contains("previewDevice") && s["previewDevice"].is_string())
+                device = s["previewDevice"].get<std::string>();
+        }
+    }
+    if (device.empty()) return {};
+    return {OutputMap::Channel{device, 0}, OutputMap::Channel{device, 1}};
+}
+
+void ProjectState::wire_monitor_bus(const BusDef& bus, BusRouting& routing) {
+    // Monitor owns the master pair the engine reserves at the top of the bus.
+    // That pair was already the preview bus's; giving it to Monitor is what
+    // merges the two, so PFL from the mixer and pre-listen from the playlist
+    // arrive in the same headphones, under the same fader, on the same meter.
+    // It is never drawn from the general pool — allocate_master_pair_locked
+    // stops below it precisely so nothing else can land here.
+    const audio::MasterChannelIndex l =
+        audio::preview_master_base(engine_.config().master_channels);
+    routing.master_l     = l;
+    routing.master_r     = l + 1;
+    routing.has_masters  = false;   // not ours to pool
+    routing.reserved_pair = true;
+
+    const auto channels = resolve_monitor_channels(bus.output_target);
+    if (channels.empty()) {
+        // Valid and silent, per §7.5. Deliberately NOT the identity fallback
+        // every other bus gets: open_device_by_name() falls back to the
+        // DEFAULT device when a name matches nothing, and for Monitor that
+        // means every PFL'd channel arriving in the house — the exact accident
+        // PFL was chosen over solo to make impossible.
+        Logger::warn("bus 'Monitor': no headphone output on this machine "
+                     "(no '{}' in the output map, no settings.previewDevice), "
+                     "so PFL and pre-listen are silent",
+                     bus.output_target);
+        return;
+    }
+    routing.wired_channels = channels;
+
+    const audio::MasterChannelIndex masters[2] = {routing.master_l, routing.master_r};
+    const std::size_t used = std::min<std::size_t>(channels.size(), 2);
+    for (std::size_t i = 0; i < used; ++i) {
+        const auto dev = engine_.open_device_by_name(channels[i].device, 2);
+        if (dev.empty()) {
+            Logger::warn("bus 'Monitor': could not open device '{}'", channels[i].device);
+            continue;
+        }
+        engine_.assign_master_to_device(masters[i], dev, channels[i].hw_channel);
+    }
+
+    if (used >= 2) {
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l, 0.0f, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_r, 0.0f, 1);
+    } else {
+        // A one-channel headphone output: fold both lanes into it rather than
+        // dropping the right-hand side of everything being auditioned.
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
+                                      audio::kDefaultDownmixDb, 0);
+        engine_.route_mixer_to_master(routing.mixer, routing.master_l,
+                                      audio::kDefaultDownmixDb, 1);
+    }
+
+    Logger::info("bus 'Monitor' -> '{}' on the reserved pair (masters {}/{}){}",
+                 channels[0].device, routing.master_l, routing.master_r,
+                 outputs_.has(bus.output_target) ? "" : " via settings.previewDevice");
+}
+
 void ProjectState::materialise_buses() {
     std::vector<BusDef>                         defs;
     std::unordered_map<std::string, BusRouting> previous;
@@ -3895,7 +4035,15 @@ void ProjectState::materialise_buses() {
         previous = bus_routings_;
         // A fresh project starts from a clean pool: every pair the outgoing
         // one held is about to be torn down wholesale.
+        //
+        // The allocator is rewound with it. Clearing the pool alone abandoned
+        // every pair the outgoing project held — open enough projects in one
+        // session and the counter walks up into the preview reserve and the
+        // next direct-out bus has nowhere to go. Same leak §1.2 described for
+        // device_routings_, and visible here as the pair index climbing by two
+        // on every reload.
         free_master_pairs_.clear();
+        next_override_master_ = kFirstOverrideMaster;
     }
 
     // Strips from the outgoing project are ours to clean up; nothing else
@@ -3919,9 +4067,18 @@ void ProjectState::materialise_buses() {
         if (auto* m = engine_.find_mixer_channel(r.mixer)) {
             m->set_gain_db(b.gain_db);
             m->set_mute(b.muted);
+            // Width so PFL can place this strip in the monitor; never PFL,
+            // because a project does not carry what the operator is listening
+            // to and a stale flag would be signal in the phones with nothing
+            // on screen to explain it.
+            m->set_width(static_cast<audio::ChannelCount>(b.width));
+            m->set_pfl(false);
         }
         wire_bus(b, r);
         created[b.id] = r;
+        // Everything PFL'd taps this strip. Nominated after wiring so the
+        // engine never sees a monitor that is not yet connected to anything.
+        if (b.id == kMonitorBusId) engine_.set_monitor_mixer(r.mixer);
     }
 
     {
@@ -3992,6 +4149,7 @@ std::optional<BusDef> ProjectState::create_bus(const json& spec) {
     if (auto* m = engine_.find_mixer_channel(r.mixer)) {
         m->set_gain_db(d.gain_db);
         m->set_mute(d.muted);
+        m->set_width(static_cast<audio::ChannelCount>(d.width));
     }
     wire_bus(d, r);
     {
@@ -4002,7 +4160,21 @@ std::optional<BusDef> ProjectState::create_bus(const json& spec) {
     return d;
 }
 
-bool ProjectState::patch_bus(const std::string& id, const json& patch) {
+ProjectState::PatchBusResult ProjectState::patch_bus(const std::string& id,
+                                                     const json& patch) {
+    // Checked before anything is mutated, so a refused patch leaves the bus
+    // exactly as it was rather than half-applied.
+    //
+    // Monitor carries PFL. Sending it to the master would put every PFL'd
+    // channel into the house mix — one click, live, in front of an audience,
+    // which is the failure mode PFL was chosen over solo to avoid. It goes to
+    // hardware or nowhere.
+    if (id == kMonitorBusId && patch.contains("output") && patch["output"].is_object() &&
+        patch["output"].value("type", std::string{"master"}) == "master") {
+        Logger::warn("patch_bus: refusing to route Monitor to the master bus");
+        return PatchBusResult::Refused;
+    }
+
     BusDef     updated;
     BusRouting routing;
     bool       found       = false;
@@ -4042,7 +4214,7 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
             updated = b;
             break;
         }
-        if (!found) return false;
+        if (!found) return PatchBusResult::NotFound;
         std::stable_sort(buses_.begin(), buses_.end(),
                          [](const BusDef& a, const BusDef& b) { return a.order < b.order; });
         write_buses_to_document_locked();
@@ -4058,6 +4230,11 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
             if (patch.contains("name")) m->set_display_name(updated.display_name);
         }
         if (needs_rewire) {
+            // Width is part of needs_rewire, and it also decides how PFL
+            // places this strip in the monitor — so the engine has to be told
+            // even for a bus that is only ever listened to.
+            engine_.set_mixer_width(routing.mixer,
+                                    static_cast<audio::ChannelCount>(updated.width));
             unwire_bus(routing);
             wire_bus(updated, routing);
             std::lock_guard lock{mutex_};
@@ -4067,7 +4244,28 @@ bool ProjectState::patch_bus(const std::string& id, const json& patch) {
             apply_bus_pan(updated, routing);
         }
     }
+    return PatchBusResult::Ok;
+}
+
+bool ProjectState::set_bus_pfl(const std::string& id, bool on) {
+    audio::MixerChannelId mixer;
+    {
+        std::lock_guard lock{mutex_};
+        // The Monitor bus is the destination, not a source. The engine
+        // refuses this too; catching it here means the API can say so.
+        if (id == kMonitorBusId) return false;
+        const auto bit = std::find_if(buses_.begin(), buses_.end(),
+                                      [&](const BusDef& b) { return b.id == id; });
+        if (bit == buses_.end()) return false;
+        mixer = mixer_for_bus(id);
+    }
+    if (mixer.empty()) return false;
+    engine_.set_mixer_pfl(mixer, on);
     return true;
+}
+
+std::size_t ProjectState::clear_all_pfl() {
+    return engine_.clear_all_pfl();
 }
 
 bool ProjectState::delete_bus(const std::string& id) {
@@ -4162,13 +4360,20 @@ std::string ProjectState::resolve_item_bus(const std::string& item_uuid) const {
 }
 
 std::vector<ProjectState::BusInfo> ProjectState::list_buses() const {
-    std::lock_guard lock{mutex_};
     std::vector<BusInfo> out;
+    {
+    std::lock_guard lock{mutex_};
     out.reserve(buses_.size());
     for (const auto& b : buses_) {
         BusInfo info;
         info.def   = b;
         info.mixer = mixer_for_bus(b.id);
+        // Master-kind buses need no binding — they land in the house pair,
+        // which the engine always wires. Everything else is bound only if it
+        // resolved to real channels when it was wired.
+        const auto rit = bus_routings_.find(b.id);
+        info.bound = b.output_kind == BusOutputKind::Master ||
+                     (rit != bus_routings_.end() && !rit->second.wired_channels.empty());
         out.push_back(std::move(info));
     }
 
@@ -4197,6 +4402,17 @@ std::vector<ProjectState::BusInfo> ProjectState::list_buses() const {
     };
     if (document_.contains("items")) walk(document_["items"]);
     if (document_.contains("cartOnlyItems")) walk(document_["cartOnlyItems"]);
+    }
+
+    // PFL is read from the live strip, not the document — it is monitoring
+    // state, not part of the show. A project that reopened with PFL latched on
+    // some bus would put signal in the operator's headphones for reasons
+    // nothing on screen explains. Asked outside the lock: this calls into the
+    // engine, which takes its own.
+    for (auto& info : out) {
+        if (info.mixer.empty()) continue;
+        if (auto* m = engine_.find_mixer_channel(info.mixer)) info.pfl = m->is_pfl();
+    }
     return out;
 }
 
@@ -4208,13 +4424,16 @@ audio::MixerChannelId ProjectState::mixer_for_bus(const std::string& bus_id) con
 bool ProjectState::start_preview(const std::string& item_uuid) {
     if (item_uuid.empty()) return false;
 
-    // 1. Resolve the source file path under the lock.
+    // 1. Resolve the source file and the strip to audition it on, under the
+    //    lock. Pre-listen goes to the Monitor bus — the same strip PFL feeds —
+    //    so there is no preview device or preview mixer to set up here any
+    //    more. Monitor is wired when the project is materialised.
     std::filesystem::path file_path;
-    double in_point = 0.0;
-    std::string preview_device_name;
+    double in_point  = 0.0;
+    float  gain_db   = 0.0f;
+    audio::MixerChannelId preview_mixer;
     {
         std::lock_guard lock{mutex_};
-        // path
         for_each_item(document_,
             [&](json& it, const std::string&) {
                 if (it.value("uuid", std::string{}) != item_uuid) return;
@@ -4222,17 +4441,26 @@ bool ProjectState::start_preview(const std::string& item_uuid) {
                     it, document_.value("folderPath", std::string{}));
                 if (!p.empty()) file_path = std::move(p);
                 in_point = it.value("inPoint", 0.0);
+                // The item's own level, same 0..2 linear field playback uses.
+                // Auditioning is meant to answer "what will this sound like
+                // when I fire it", and a preview that ignored the trim you
+                // just set answered a different question — audibly so now
+                // that pre-listen and PFL share one meter.
+                if (it.contains("volume") && it["volume"].is_number()) {
+                    const float lin = it["volume"].get<float>();
+                    gain_db = (lin <= 0.0001f) ? -120.0f
+                                               : 20.0f * std::log10(lin);
+                }
             });
-        // settings.previewDevice
-        if (document_.contains("settings") && document_["settings"].is_object()) {
-            const auto& s = document_["settings"];
-            if (s.contains("previewDevice") && s["previewDevice"].is_string()) {
-                preview_device_name = s["previewDevice"].get<std::string>();
-            }
-        }
+        preview_mixer = mixer_for_bus(kMonitorBusId);
     }
     if (file_path.empty()) {
         Logger::warn("preview: item '{}' has no resolvable file path", item_uuid);
+        return false;
+    }
+    if (preview_mixer.empty()) {
+        Logger::warn("preview: the Monitor bus has no engine strip, so there is "
+                     "nowhere to audition '{}'", item_uuid);
         return false;
     }
 
@@ -4252,77 +4480,17 @@ bool ProjectState::start_preview(const std::string& item_uuid) {
         }
     }
 
-    // 3. Ensure preview infrastructure (device open + mixer + master wiring).
-    audio::MixerChannelId preview_mixer;
-    {
-        // If the user changed the preview device since our last setup,
-        // close the old one and start fresh.
-        std::string current_name;
-        audio::DeviceId current_device;
-        audio::MixerChannelId current_mixer;
-        {
-            std::lock_guard lock{mutex_};
-            current_name   = preview_device_name_;
-            current_device = preview_device_;
-            current_mixer  = preview_mixer_;
-        }
-
-        if (preview_device_name.empty()) {
-            Logger::warn("preview: no preview device configured in settings");
-            return false;
-        }
-
-        if (current_name != preview_device_name && !current_device.empty()) {
-            // Close old preview device + mixer.
-            engine_.close_device(current_device);
-            if (!current_mixer.empty()) engine_.remove_mixer_channel(current_mixer);
-            std::lock_guard lock{mutex_};
-            preview_device_ = audio::DeviceId{};
-            preview_mixer_  = audio::MixerChannelId{};
-            preview_device_name_.clear();
-        }
-
-        if (preview_device_.empty()) {
-            // Open the device, create a dedicated "Preview" mixer, wire it.
-            const auto dev = engine_.open_device_by_name(preview_device_name, 2);
-            if (dev.empty()) {
-                Logger::warn("preview: could not open device '{}'", preview_device_name);
-                return false;
-            }
-            // Preview owns the top two channels of the bus, wherever the
-            // configured bus width puts them. 
-            const audio::MasterChannelIndex preview_l =
-                audio::preview_master_base(engine_.config().master_channels);
-            const audio::MasterChannelIndex preview_r = preview_l + 1;
-
-            const auto mixer = engine_.create_mixer_channel("Preview");
-            if (mixer.empty()) {
-                Logger::warn("preview: no mixer strip available");
-                return false;
-            }
-            engine_.assign_master_to_device(preview_l, dev, 0);
-            engine_.assign_master_to_device(preview_r, dev, 1);
-            engine_.route_mixer_to_master(mixer, preview_l, 0.0f, 0);
-            engine_.route_mixer_to_master(mixer, preview_r, 0.0f, 1);
-            {
-                std::lock_guard lock{mutex_};
-                preview_device_      = dev;
-                preview_mixer_       = mixer;
-                preview_device_name_ = preview_device_name;
-                preview_mixer = mixer;
-            }
-        } else {
-            preview_mixer = preview_mixer_;
-        }
-    }
-
-    // 4. Load the file as a fresh engine cue, route it to the preview mixer
+    // 3. Load the file as a fresh engine cue, route it to the Monitor strip
     // ONLY (no auto-routing to Main). prime + play.
     const auto cue_id = engine_.load_cue_no_route(file_path);
     if (cue_id.empty()) return false;
 
     auto* pi = engine_.find_cue(cue_id);
     if (pi) {
+        // The item's level, and only that. Not its fades — a preview that
+        // faded in would hide the start of what you are checking — and not its
+        // LTC, which belongs to the show, not to an audition.
+        pi->set_gain_db(gain_db);
         if (pi->source_channel_count() >= 2) {
             // Stereo: L → lane 0, R → lane 1.
             engine_.route_item_source_to_mixer(cue_id, 0, preview_mixer, 0.0f, 0);
@@ -4341,7 +4509,7 @@ bool ProjectState::start_preview(const std::string& item_uuid) {
         preview_cue_       = cue_id;
         preview_item_uuid_ = item_uuid;
     }
-    Logger::info("preview: started for item '{}' on '{}'", item_uuid, preview_device_name);
+    Logger::info("preview: started for item '{}' on the Monitor bus", item_uuid);
     return true;
 }
 
@@ -4690,7 +4858,12 @@ bool ProjectState::load_from_json(const json& doc_in) {
             mm.display_name = m.value("display_name", "");
             mm.gain_db      = m.value("gain_db", 0.0f);
             mm.muted        = m.value("muted",   false);
-            mm.soloed       = m.value("soloed",  false);
+            // `soloed` is the pre-PFL spelling. Reading it here and writing
+            // `pfl` back is the whole of the migration §5.3 asked for — solo
+            // was never reachable from the UI, so a document carrying it is
+            // unlikely, and the two meant close enough to the same thing for
+            // the value to survive.
+            mm.pfl          = m.value("pfl", m.value("soloed", false));
             mixers_.emplace(mm.id.value, std::move(mm));
         }
     }
@@ -4822,7 +4995,7 @@ void ProjectState::apply_to_engine_locked() {
         if (auto* m = engine_.find_mixer_channel(created)) {
             m->set_gain_db(mm.gain_db);
             m->set_mute (mm.muted);
-            m->set_solo (mm.soloed);
+            m->set_pfl  (mm.pfl);
         }
     }
     // 3) Re-apply routes.

@@ -31,10 +31,12 @@
           :mode="mode"
           :detached="detached"
           :can-detach="canDetach"
+          :pfl-count="pflCount"
           @add="addBus"
           @detach="detach"
           @mode="$emit('mode', $event)"
           @close="$emit('close')"
+          @clear-pfl="clearPfl"
         />
       </template>
     </MixerChannelDetails>
@@ -56,11 +58,25 @@
           <p v-if="userBuses.length === 0" class="mixer__empty">{{ t('mixer.empty') }}</p>
         </div>
 
-        <!-- Master, pinned right — the same component as every other strip, so
-             it has the same rows at the same heights and its fader lines up
-             with theirs. It was bespoke markup here, which is exactly why the
-             one strip that matters most looked unlike all the others. -->
+        <!-- Monitor and master, pinned right — the same component as every
+             other strip, so they have the same rows at the same heights and
+             their faders line up with the rail's. The master was bespoke
+             markup here, which is exactly why the one strip that matters most
+             looked unlike all the others.
+
+             Monitor is a real bus with a real fader — that fader is the
+             headphone level — but it is where PFL lands rather than a channel
+             anything can be assigned to, so it sits beside the master instead
+             of in the assignable rail. -->
         <div class="mixer__master">
+          <MixerStrip
+            v-if="monitorBus"
+            :bus="monitorBus"
+            :touch="touch"
+            :output-names="outputNames"
+            monitor
+            @patch="onPatch"
+          />
           <MixerStrip :bus="masterBus" :touch="touch" :output-names="[]" master />
         </div>
       </div>
@@ -73,10 +89,12 @@
           :mode="mode"
           :detached="detached"
           :can-detach="canDetach"
+          :pfl-count="pflCount"
           @add="addBus"
           @detach="detach"
           @mode="$emit('mode', $event)"
           @close="$emit('close')"
+          @clear-pfl="clearPfl"
         />
       </footer>
     </template>
@@ -159,6 +177,8 @@ const masterBus = computed<Bus>(() => ({
   gainDb: masterGainDb.value,
   mute: false,
   pan: 0,
+  pfl: false,
+  bound: true,
   system: true,
   output: { type: 'output', target: '' },
   mixerId: '',
@@ -179,6 +199,21 @@ const buses = computed<Bus[]>(() => server.buses ?? []);
 // mid-rebuild emptied the whole rail, and nothing refetched until the panel
 // was remounted — which is why expanding or undocking appeared to "fix" it.
 const userBuses = computed(() => buses.value.filter(b => !b.system));
+
+// Monitor gets a strip of its own next to the master, because since PFL landed
+// it has something to carry and a level worth reaching for. Absent only while
+// the first fetch is in flight.
+const monitorBus = computed(() => buses.value.find(b => b.id === 'monitor') ?? null);
+
+// Anything currently in the phones. Drives the clear control, which exists
+// because PFL is additive and silent about it: three channels tapped from
+// three different windows sound like one muddled headphone mix with no single
+// button lit to explain it.
+const pflCount = computed(() => buses.value.reduce((n, b) => n + (b.pfl ? 1 : 0), 0));
+
+async function clearPfl() {
+  await server.clearAllPfl();
+}
 
 // The channel view takes the whole window, so it is only ever entered in full
 // mode — a docked side pane has nowhere to put the processing panels.
