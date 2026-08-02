@@ -17,8 +17,10 @@
       <button class="cf__step" :disabled="!prevId" :title="t('mixer.prevChannel')" @click="$emit('select', prevId)">
         <span class="material-symbols-rounded">chevron_left</span>
       </button>
+      <!-- No colour chip here. Between two stepping arrows the name field wants
+           every pixel it can get, and the chip is already carried by the view
+           header and by every tile in the select row. -->
       <div class="cf__name">
-        <span class="cf__chip" :style="{ background: bus.color || 'var(--color-accent)' }"></span>
         <input
           :value="bus.name"
           :disabled="bus.system"
@@ -237,8 +239,7 @@ const meterLabel = computed(() => {
   cursor: pointer;
 }
 .cf__step:disabled { opacity: 0.3; cursor: default; }
-.cf__name { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-.cf__chip { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.cf__name { display: flex; align-items: center; flex: 1; min-width: 0; }
 .cf__name input {
   width: 100%;
   min-width: 0;
