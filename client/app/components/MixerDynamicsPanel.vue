@@ -49,7 +49,7 @@
               v-for="p in gateParams" :key="p.key"
               :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
               :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
-              :size="32" disabled
+              :size="28" disabled
             />
           </div>
         </div>
@@ -61,7 +61,7 @@
               v-for="p in compParams" :key="p.key"
               :value="p.value" :min="p.min" :max="p.max" :origin="p.origin"
               :decimals="p.decimals" :unit="p.unit" :label="t(p.key)"
-              :size="32" disabled
+              :size="28" disabled
             />
           </div>
         </div>
@@ -120,7 +120,7 @@ const compParams = [
   flex: 0 0 auto;
   align-self: center;
   aspect-ratio: 1;
-  height: clamp(110px, 18vh, 190px);
+  height: clamp(100px, 15vh, 170px);
   max-height: 100%;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
@@ -137,7 +137,7 @@ const compParams = [
   gap: var(--spacing-xs);
   flex: 0 0 auto;
   align-self: center;
-  height: clamp(110px, 18vh, 190px);
+  height: clamp(100px, 15vh, 170px);
   max-height: 100%;
   min-height: 0;
 }
@@ -163,15 +163,18 @@ const compParams = [
   color: var(--color-text-disabled);
 }
 
+/* Kept deliberately tight. Row 1 of the work area is as tall as the taller of
+   this panel and the EQ, so every pixel dynamics does not need is a pixel the
+   plugin rack and the bus lists below get instead. */
 .dyn__controls {
   display: flex;
   flex-direction: column;
-  justify-content: space-evenly;
-  gap: var(--spacing-xs);
+  justify-content: center;
+  gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
 }
-.dyn__group { display: flex; flex-direction: column; gap: 2px; }
+.dyn__group { display: flex; flex-direction: column; gap: 1px; }
 .dyn__h {
   margin: 0;
   font-size: 9px;
@@ -184,7 +187,7 @@ const compParams = [
 .dyn__row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
+  gap: 2px 4px;
   justify-items: center;
 }
 </style>

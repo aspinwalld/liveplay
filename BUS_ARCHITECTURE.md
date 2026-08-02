@@ -637,11 +637,15 @@ Beneath each sits the thing that belongs to it and needs no height of its own: t
 under EQ (three across, two down — six slots in the shortest arrangement), the connection panels
 under dynamics.
 
-**The window has a floor of 1280x768** (`MIN_WINDOW` in `client/electron/main.js`), applied to the
-main window and the detached mixer but not the cart player, which is a pad grid and is legitimately
-used shrunk into a corner. The breakpoints below stay as a safety net for display scaling and for
-the docked side pane, but the channel view is designed against that floor rather than against
-arbitrarily small windows.
+**The window has a floor of 1280x720 of *page*** (`MIN_WINDOW` in `client/electron/main.js`),
+applied to the main window and the detached mixer but not the cart player, which is a pad grid and
+is legitimately used shrunk into a corner. `useContentSize` is the load-bearing part: without it
+Electron's minimums describe the outer window, so a 1280x768 floor left the page at 1266x706 on
+Windows — and every breakpoint and `vh` unit in this layout measures the page. Measured outer size
+is about 1295x784, so the app wants a display with ~800px of usable height. The breakpoints below
+stay as a safety net for display scaling and for the docked side pane, but the channel view is sized
+against that floor: at 720 the EQ panel lands near 350px, leaving the row beneath it roughly 270 for
+the plugin rack and the bus lists.
 
 **Two escapes, one per axis, and they are not the same escape.** Below 1180px *wide* the grid
 collapses to a single column. Below 660px *tall* it keeps both columns and only stops dividing the

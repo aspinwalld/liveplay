@@ -1141,7 +1141,18 @@ let mixerWindow = null;       // Detached mixer window
 // main window and the detached mixer, both of which render the mixer's channel
 // view. Not applied to the cart player: that is a pad grid, and shrinking it to
 // a corner of a screen is a legitimate way to use it.
-const MIN_WINDOW = { minWidth: 1280, minHeight: 768 };
+//
+// useContentSize matters here. Without it these numbers describe the outer
+// window, frame included, so a 1280x768 minimum left the page itself at
+// 1266x706 on Windows — the borders and title bar eat 14 and 62 — and every
+// CSS breakpoint and vh unit in the layout is measured against the page, not
+// the frame. With it, the numbers mean what the stylesheets assume.
+//
+// Measured on Windows: this yields an outer window of about 1295x784, so the
+// app needs a display with roughly 800px of usable height. A 1366x768 panel
+// cannot fit it; dropping to 1280x640 content would, at the cost of the
+// channel view falling back to its stacked, scrolling layout.
+const MIN_WINDOW = { minWidth: 1280, minHeight: 720, useContentSize: true };
 
 // Flatten all audio items from a nested project items array
 function flattenAudioItems(items) {

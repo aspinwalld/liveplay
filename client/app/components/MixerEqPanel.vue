@@ -50,21 +50,21 @@
       <KnobField
         v-for="b in bands" :key="'f' + b.id"
         :value="b.freq" :min="20" :max="20000" :origin="1000"
-        :decimals="0" unit="Hz" :size="34" :show-label="false" disabled
+        :decimals="0" unit="Hz" :size="30" :show-label="false" disabled
       />
 
       <span class="eq__rowlabel">{{ t('mixer.gain') }}</span>
       <KnobField
         v-for="b in bands" :key="'g' + b.id"
         :value="b.gain" :min="-18" :max="18" :origin="0"
-        :decimals="1" unit="dB" :size="34" :show-label="false" disabled
+        :decimals="1" unit="dB" :size="30" :show-label="false" disabled
       />
 
       <span class="eq__rowlabel">{{ t('mixer.q') }}</span>
       <KnobField
         v-for="b in bands" :key="'q' + b.id"
         :value="b.q" :min="0.1" :max="10" :origin="0.7"
-        :decimals="2" :size="34" :show-label="false" disabled
+        :decimals="2" :size="30" :show-label="false" disabled
       />
     </div>
   </section>
@@ -119,10 +119,13 @@ const handleColor = (i: number) =>
    which extra height tells you nothing more about a curve. Sized rather than
    flexed on purpose: a definite height makes this panel's total height
    knowable, which is what lets the grid hand the leftover space to the panels
-   below instead of padding this one out. */
+   below instead of padding this one out.
+   The floor and the vh factor are set against the 720px content floor the
+   window now enforces — at that size the panel comes in around 350px, leaving
+   the row beneath it roughly 270 for the plugin rack and the bus lists. */
 .eq__graph {
   position: relative;
-  height: clamp(150px, 26vh, 300px);
+  height: clamp(140px, 22vh, 280px);
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;
