@@ -51,7 +51,7 @@
              chosen to make impossible; the server refuses it too. -->
         <option v-if="!monitor" value="master">{{ t('mixer.toMaster') }}</option>
         <option
-          v-for="o in outputNames"
+          v-for="o in outputOptions"
           :key="'out:' + o"
           :value="'out:' + o"
         >{{ o }}</option>
@@ -124,25 +124,23 @@
          both map dB to position linearly. -->
     <div class="strip__meterfader">
       <div class="strip__meters" :style="{ height: METER_TRACK_PCT + '%' }">
-        <!-- The same meter the master uses, so zone colours, peak hold, the
-             clip latch and the project's meter mode are identical on every
-             strip. The strip supplies the frame and the shared scale, so the
-             meter renders bare and without its own tick column. -->
+        <!-- One meter for every strip, master included: same zone colours,
+             peak hold, clip latch, meter mode and — since the rail should be
+             one grid rather than three near-misses — the same gain-reduction
+             sub-track. The strip supplies the frame and the shared scale, so
+             the meter renders bare and without its own tick column.
+
+             The master reads the output pair, a bus reads its strip lanes;
+             that is the only difference, and it is two props. -->
         <StereoMeter
-          v-if="master"
-          :left-index="0"
-          :right-index="1"
+          v-if="master || bus.mixerId"
+          :left-index="master ? 0 : null"
+          :right-index="master ? 1 : null"
+          :mixer-id="master ? null : bus.mixerId"
+          :mono="!master && bus.width < 2"
           bare
           :show-scale="false"
-          :min-db="FADER_MIN_DB"
-          :max-db="METER_MAX_DB"
-        />
-        <StereoMeter
-          v-else-if="bus.mixerId"
-          :mixer-id="bus.mixerId"
-          :mono="bus.width < 2"
-          bare
-          :show-scale="false"
+          show-gr
           :min-db="FADER_MIN_DB"
           :max-db="METER_MAX_DB"
         />
@@ -184,8 +182,10 @@
       />
       <span v-else class="strip__nametext" @dblclick.stop="startRename">{{ bus.name }}</span>
     </div>
-    <!-- Always rendered, blank on the master: the rows below the fader have to
-         be the same height on every strip or the faders stop lining up. -->
+    <!-- Item count. Rendered on every strip, blank where it has no meaning, and
+         with a reserved height — an empty div collapses to nothing, which let
+         the master's meter/fader block grow by a row and pushed its readout,
+         level and name below everyone else's. -->
     <div class="strip__count">
       {{ master ? '' : t('mixer.itemCount', { count: bus.itemUuids.length }) }}
     </div>
@@ -249,21 +249,30 @@ watch(() => props.bus.gainDb, v => { if (!holding) gainDb.value = v; });
 
 function onFader(db: number) {
   gainDb.value = db;
-  // The master's fader is the output-channel pair, the same parameter the
-  // transport bar's Main fader drives — it has no bus to patch, and its value
-  // comes back over the output_channel_gain_changed broadcast.
+  // Hold the local value for every strip, master included.
+  //
+  // The master used to return here without setting `holding`, which left the
+  // watch above live during the drag. Its value comes back asynchronously over
+  // output_channel_gain_changed — two broadcasts per drag event, one per
+  // channel — so the queued echoes kept overwriting the position with older
+  // values: the fader jumped, then crawled to where you had put it as the
+  // backlog drained. Every other fader held its value and did not.
+  holding = true;
   if (props.master) {
+    // The output-channel pair, the same parameter the transport bar's Main
+    // fader drives. Both channels, so the pair stays level-matched.
     void server.setOutputChannelGainDb(0, db);
     void server.setOutputChannelGainDb(1, db);
-    return;
+  } else if (props.bus.mixerId) {
+    void server.setMixerGainDb(props.bus.mixerId, db).catch(() => {});
   }
-  holding = true;
-  if (props.bus.mixerId) void server.setMixerGainDb(props.bus.mixerId, db).catch(() => {});
   if (settle) clearTimeout(settle);
   settle = setTimeout(() => {
     settle  = null;
     holding = false;
-    emit('patch', props.bus.id, { gainDb: gainDb.value });
+    // Nothing to persist for the master: it has no bus, and the engine is
+    // already holding the value the broadcast will echo back.
+    if (!props.master) emit('patch', props.bus.id, { gainDb: gainDb.value });
   }, 250);
 }
 
@@ -377,6 +386,22 @@ const gainLabel = computed(() => {
 const outputValue = computed(() => {
   const o = props.bus.output;
   return o.type === 'output' ? 'out:' + o.target : 'master';
+});
+
+// The names offered, plus whatever this bus is already pointing at.
+//
+// Without the second part the select can have no option matching its value and
+// renders blank: a bus targeting a name this machine does not map, and — since
+// Monitor is offered no "to master" entry — the Monitor strip on any machine
+// with no logical outputs at all, which is the default. A picker showing
+// nothing where a route should be is worse than showing an unmapped one.
+const outputOptions = computed(() => {
+  const names = [...props.outputNames];
+  const target = props.bus.output.target;
+  if (props.bus.output.type === 'output' && target && !names.includes(target)) {
+    names.push(target);
+  }
+  return names;
 });
 
 // Whether this bus reaches hardware — answered by the server, not inferred
@@ -586,6 +611,10 @@ function onOutputChange(e: Event) {
 .strip__count {
   text-align: center;
   font-size: 9px;
+  line-height: 12px;
+  /* Reserved, not natural: blank on the master, and a collapsed row there put
+     that strip's fader and name a row lower than every other one. */
+  height: 12px;
   color: var(--color-text-disabled);
 }
 </style>

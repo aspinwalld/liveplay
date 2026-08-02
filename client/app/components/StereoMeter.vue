@@ -43,7 +43,7 @@
               <div v-if="holdVisibleL" class="stereo-meter__hold" :style="holdStyleL" />
             </div>
             <!-- GR track: same rounded-rect shape, accent fill from top -->
-            <div v-if="showGr" class="stereo-meter__gr-track">
+            <div v-if="grVisible" class="stereo-meter__gr-track">
               <div class="stereo-meter__gr-fill" :style="grStyleL" />
             </div>
           </div>
@@ -62,7 +62,7 @@
               <div class="stereo-meter__fill" :style="peakStyleR" />
               <div v-if="holdVisibleR" class="stereo-meter__hold" :style="holdStyleR" />
             </div>
-            <div v-if="showGr" class="stereo-meter__gr-track">
+            <div v-if="grVisible" class="stereo-meter__gr-track">
               <div class="stereo-meter__gr-fill" :style="grStyleR" />
             </div>
           </div>
@@ -110,6 +110,17 @@ const props = withDefaults(defineProps<{
    * can sit inside a strip that already provides them.
    */
   bare?: boolean;
+  /**
+   * Force the gain-reduction sub-track on or off. Left unset it appears only
+   * for master channels, which are the only source that reports GR today.
+   *
+   * The mixer sets it on every strip so the rail is one uniform grid: with it
+   * appearing on the master alone, that strip's meter block was wider than the
+   * others and its fader sat further across. A bus reads zero reduction, which
+   * is not a placeholder (nothing is reducing it) and is where the bus
+   * compressor's reading will land.
+   */
+  showGr?: boolean;
   minDb?: number;
   maxDb?: number;
 }>(), {
@@ -122,6 +133,7 @@ const props = withDefaults(defineProps<{
   showPeakValue: false,
   showScale: true,
   bare: false,
+  showGr: undefined,
   minDb: -60,
   maxDb: 0,
 });
@@ -180,9 +192,11 @@ const srcR = computed<Reading>(() =>
   : props.mixerId != null ? readStream(mixerR)
   : readStream(rightStream));
 
-// Gain reduction is a master-bus limiter reading; a mixer strip has no
-// dynamics of its own yet, so the GR track only appears for master channels.
-const showGr = computed(() => props.leftIndex != null || props.rightIndex != null);
+// Gain reduction is reported by master channels today; a bus has no dynamics
+// of its own until Stage 5, so it reads zero. The caller can still ask for the
+// track, and the mixer does, so every strip in the rail is the same width.
+const grVisible = computed(() =>
+  props.showGr ?? (props.leftIndex != null || props.rightIndex != null));
 
 // Server-reported output-target levels and meter mode.
 const { levels, meterMode, colorForLevel } = useOutputTarget();
