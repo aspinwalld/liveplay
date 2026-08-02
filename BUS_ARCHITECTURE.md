@@ -1,6 +1,7 @@
 # LivePlay — Bus Architecture
 
-> **Status:** Stages 0–2 implemented on `fix/engine-config-wiring`. Stages 3–5 not started.
+> **Status:** Stages 0–2 complete on `fix/engine-config-wiring`, unmerged. Stages 3–5 not started.
+> Stage 3 (PFL + Monitor) is the next one; it is the first to touch the render loop.
 > Supersedes the "Stage 3 — Bus Mixing" sketch in `IMPROVEMENTS_PLAN.md` §6, which is now
 > stale (it lists mute/solo/mixer-meters as missing; they exist).
 > Ownership-model placement follows the object-ownership model discussed in issue #46.
@@ -25,10 +26,27 @@ and resolve by walking group ancestry: an item's own `busId` wins, else the near
 group's, else Main. Full CRUD over REST with `buses_patched` broadcast. Master pairs are kept for
 a bus's lifetime and returned to a free list on delete or rewire.
 
-**Stage 2 — mixer.** `MixerPanel` / `MixerStrip` / `MixerChannelDetails`, docking as a resizable
+**Stage 2 — mixer. Complete.** A strip rail with the master pinned right, docking as a resizable
 side pane, taking the full workspace, or popping out into its own Electron window
-(`?mixerWindow=1`). Per-lane meters. `Knob.vue` and pan on mono buses. The legacy
-`RoutingMatrixPanel` and the per-item device-override control are deleted.
+(`?mixerWindow=1`). Per-lane meters through one meter component. A full-window channel view
+(§8.4) with a dedicated channel column, four-band EQ, dynamics, a plugin rack, the bus's
+contributions and sends, and a metered channel-select row. `Knob.vue` + `KnobField.vue`, and pan on
+mono buses — the one processing control that is real. The legacy `RoutingMatrixPanel`, the per-item
+device-override control and `LiveMeterBar` are deleted.
+
+The client files, since they are now spread across several components:
+
+| File | Role |
+|---|---|
+| `MixerPanel.vue` | The rail, the master, and which view is showing |
+| `MixerStrip.vue` | One rail strip; also renders the master via `master` |
+| `MixerActions.vue` | Add-bus + window buttons; lives in a bottom bar, not a title bar |
+| `MixerChannelDetails.vue` | The channel view's layout and its select row |
+| `MixerChannelFader.vue` | The channel view's left column (its own layout, shared controls) |
+| `MixerEqPanel.vue`, `MixerDynamicsPanel.vue` | Processing shells |
+| `StereoMeter.vue` | Every meter in the app — cue, mixer strip, master pair |
+| `CanvasFader.vue`, `Knob.vue`, `KnobField.vue`, `MeterScale.vue` | The shared controls |
+| `utils/meterScale.ts` | The shared dB geometry and readout formatting |
 
 ### 0.2 Decisions taken during implementation
 
@@ -58,6 +76,18 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 | **A stereo bus shows its pan knob disabled** rather than hiding it. | Strips must stay the same height or the meters stop lining up across the rail. Balance is still deferred (§2.5.3). |
 | **An output-map save re-wires only the buses the edit actually moved.** `BusRouting` records what the name resolved to when it was wired; `PUT /api/outputs` re-resolves each Output-kind bus and leaves it alone unless the channels differ. | Buses are wired from the map at load, so without this a remap did nothing until the project was reloaded. Rewiring *everything* would have been the easy fix, but it drops audio on buses the edit never touched — not acceptable mid-show. A bus that failed to wire earlier records no resolution, so it compares as changed and gets retried, which is what you want right after fixing the map. |
 
+### 0.2b Bugs found while building Stage 2
+
+Each of these was reported as a UI symptom and turned out to be something else. Recorded because
+the symptom is misleading in every case.
+
+| Symptom | Actual cause |
+|---|---|
+| Assigning a cue to a bus emptied the whole mixer; expanding or undocking brought it back | `materialise_buses()` cleared `bus_routings_` under the lock and then released it for the entire rebuild, so a `GET /api/buses` landing in that window reported every bus with no strip — and the mixer hid buses without one. The table is now copied and swapped once at the end, and the mixer no longer filters on `mixerId`. **Verified: 2 bad reads in 13,371 polls before, 0 in 13,228 after.** |
+| Cart items created in a detached window vanished on reattach, until restart | A detached window runs without the sync watchers, so nothing pushed the new item; the main window then pushed its own older copy back over IPC and the cart window cleared and repopulated from it. Detached windows now publish new items through the targeted endpoints and never author a whole-document save. |
+| Dynamics appearing beside the plugin rack instead of at the top of its column | The short-window breakpoint dropped explicit grid *rows* but kept explicit *columns*, handing placement to auto-flow — whose cursor never moves backwards. |
+| The window minimum "not working" (measured 1266x706 against a 1280x768 setting) | It was working. Electron's minimums describe the outer window unless `useContentSize` is set; the frame eats 14 and 62 on Windows. Every breakpoint and `vh` in this layout measures the page, so the floor now uses `useContentSize`. |
+
 ### 0.3 Not done
 
 - **Stage 3 — PFL + Monitor bus.** Monitor exists as a bus but nothing feeds it.
@@ -72,6 +102,12 @@ side pane, taking the full workspace, or popping out into its own Electron windo
   built.
 - **Neither `CanvasFader` nor `Knob` is keyboard-reachable.** Deliberate, so the two behave
   identically, but it means the mixer cannot be driven without a pointer.
+- **The EQ band handles are not draggable.** With no EQ behind them there is nothing to drag to;
+  they are position markers on a flat curve. Making them live is Stage 5.
+- **Nothing on this branch has been driven through the GUI by me** — no browser driver is present
+  and I did not add one. Every UI change was verified by build plus reasoning, and by the
+  maintainer testing manually. The server work *is* verified: unit tests plus a live instance
+  driven over REST and WebSocket.
 
 ---
 
