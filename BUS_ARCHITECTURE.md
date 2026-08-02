@@ -50,6 +50,7 @@ side pane, taking the full workspace, or popping out into its own Electron windo
 | **The channel view replaces the rail instead of docking under it, and drops its tabs** (§8.4). Its left column is a dedicated `MixerChannelFader`, not the rail strip. | Sharing the height left the strips half-size in the one mode with room for them, and moved the fader you were holding. Tabs put a compressor behind a click during a show. The channel column has room a rail strip does not — filters, a wider fader — so it is its own layout built from the same control components rather than the same layout twice. |
 | **EQ bands are columns and parameters are rows**, and every cell is a knob *and* a typeable box. | A column is a band, which is the thing an operator reaches for; the transpose makes you read across to find one band. Ear-driven and spec-driven work both happen, so both input styles are present. |
 | **Plugins**, not Inserts. | "Insert" names the routing; "plugin" names what the user is actually looking for. |
+| **The mixer has no title bar.** Add-bus and the window buttons ride the bottom bar (`MixerActions`), which the channel view's select row hosts too. | A mixer is judged on how much of the window is fader. A header cost a row on every view to say "Mixer" to someone who just opened the mixer. |
 | **Which channel is open is separate state from which strip is selected.** | With one value, any click on a strip threw the window out of the rail into the channel view. |
 | **The detached mixer window still takes the cart window's project-data IPC**, despite needing no document to function. | Meter zone colours come from `settings.outputTargetLevels`, and theme/accent from `theme` — without them the popped-out meters would colour off the EBU defaults and disagree with the same meter in the main window. Buses, meters and fader moves do go over that window's own WebSocket. |
 | **Detaching leaves `mixerOpen` alone**; the main window hides the panel while `mixerDetached` is set. | Closing the pop-out puts the panel back exactly where it was, and the header toggle can raise the window instead of opening a second copy of the same faders. |
@@ -632,9 +633,13 @@ Beneath each sits the thing that belongs to it and needs no height of its own: t
 under EQ (three across, two down — six slots in the shortest arrangement), the connection panels
 under dynamics.
 
-**Two escapes, one per axis.** Below 1180px wide *or* 660px tall, the grid stops dividing space and
-becomes a single column of natural-height sections that the work area scrolls. Squeezing two full
-panels into a small window leaves both unusable; scrolling costs a gesture and keeps them whole.
+**Two escapes, one per axis, and they are not the same escape.** Below 1180px *wide* the grid
+collapses to a single column. Below 660px *tall* it keeps both columns and only stops dividing the
+height — a short window is usually a wide one, and collapsing there would waste the width it does
+have. Only `grid-template-rows` changes in the height case: an earlier version also set
+`grid-row: auto` while leaving the explicit columns, which handed placement back to auto-flow, and
+because the auto-placement cursor never moves backwards, dynamics landed in column 2 *row 2* beside
+the plugin rack instead of at the top.
 
 **Contributions is capped by Sends, not the other way round.** A bus can feed a hundred cues, so
 letting that list drive the row height would push the panel off the bottom of the window. The list

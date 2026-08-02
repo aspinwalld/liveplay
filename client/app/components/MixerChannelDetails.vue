@@ -170,6 +170,10 @@
       >
         <span class="material-symbols-rounded">chevron_right</span>
       </button>
+
+      <!-- The mixer's own controls ride this bar rather than a title row of
+           their own; the parent fills them in. -->
+      <slot name="actions" />
     </footer>
   </div>
 </template>
@@ -300,18 +304,17 @@ function itemName(uuid: string): string {
   }
 }
 
-/* Short: the same escape, for height. Squeezing two full panels into a short
-   window leaves both unusable, so stop dividing the height and let the work
-   area scroll instead. */
+/* Short: stop dividing the height and let each row take what it needs, with
+   the work area scrolling. The columns stay — a short window is usually a wide
+   one, and collapsing to one column there wastes the width it does have.
+
+   Only grid-template-rows changes. An earlier version also set grid-row: auto
+   while leaving the explicit columns in place, which handed placement back to
+   auto-flow: the cursor never moves backwards, so after EQ and plugins filled
+   column 1 rows 1 and 2, dynamics landed in column 2 *row 2* beside plugins
+   instead of at the top, with the connection panels pushed to row 3. */
 @media (max-height: 660px) {
-  .det__work {
-    grid-template-rows: none;
-    grid-auto-rows: min-content;
-  }
-  .det__eq      { grid-row: auto; }
-  .det__plugins { grid-row: auto; }
-  .det__dyn     { grid-row: auto; }
-  .det__io      { grid-row: auto; }
+  .det__work { grid-template-rows: auto auto; }
 }
 
 .det__panel {

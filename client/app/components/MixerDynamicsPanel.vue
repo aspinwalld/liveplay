@@ -108,12 +108,19 @@ const compParams = [
   min-height: 0;
 }
 
-/* Full height of the panel, square, so the transfer curve keeps its 1:1
-   reading — a stretched dynamics graph lies about the slope. */
+/* Square, so the transfer curve keeps its 1:1 reading — a stretched dynamics
+   graph lies about the slope. Capped, because square plus full panel height
+   means it grows without limit on a tall window and swallows the panel; past
+   this size it stops telling you anything more. */
 .dyn__graph {
   flex: 0 0 auto;
   aspect-ratio: 1;
   min-width: 90px;
+  /* Stretch, then clamp — the box has no content of its own, so it needs the
+     row's height to have any height at all. A max-height under stretch also
+     pins it to the top once clamped, which is where it belongs. */
+  align-self: stretch;
+  max-height: 190px;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;
@@ -122,11 +129,14 @@ const compParams = [
 .dyn__grid  { stroke: var(--color-border); stroke-width: 1; opacity: 0.5; }
 .dyn__unity { stroke: var(--color-accent); stroke-width: 2; }
 
+/* Same cap as the graph, and clamped the same way, so the two stay one block. */
 .dyn__grmeters {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
   flex: 0 0 auto;
+  align-self: stretch;
+  max-height: 190px;
   min-height: 0;
 }
 .dyn__gr {

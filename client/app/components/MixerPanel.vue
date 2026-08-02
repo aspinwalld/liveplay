@@ -9,49 +9,13 @@
     details view instead.
   -->
   <div class="mixer">
-    <header class="mixer__bar">
-      <h3 class="mixer__title">{{ t('mixer.title') }}</h3>
-      <button class="mixer__add" @click="addBus">
-        <span class="material-symbols-rounded">add</span>
-        <span>{{ t('mixer.addBus') }}</span>
-      </button>
-      <div class="mixer__spacer"></div>
-
-      <!-- Detached: the window IS the mixer, so the side/full toggle has
-           nothing to toggle between and the only exit is back to the main
-           window. Docked: offer detach, the size toggle, and close. -->
-      <template v-if="!detached">
-        <button v-if="canDetach" class="mixer__close" :title="t('mixer.detach')" @click="detach">
-          <span class="material-symbols-rounded">open_in_new</span>
-        </button>
-        <button
-          class="mixer__close"
-          :title="mode === 'side' ? t('mixer.expand') : t('mixer.dock')"
-          @click="$emit('mode', mode === 'side' ? 'full' : 'side')"
-        >
-          <span class="material-symbols-rounded">
-            {{ mode === 'side' ? 'open_in_full' : 'close_fullscreen' }}
-          </span>
-        </button>
-      </template>
-
-      <button
-        class="mixer__close"
-        :title="detached ? t('mixer.dockToMain') : t('mixer.close')"
-        @click="$emit('close')"
-      >
-        <span class="material-symbols-rounded">
-          {{ detached ? 'dock_to_left' : 'close' }}
-        </span>
-      </button>
-    </header>
-
     <!-- The channel view replaces the rail rather than sharing the window with
          it. Splitting the height between the two left the strips half-height
          in the one mode that has room for them, and put the fader you were
          adjusting somewhere different from where you grabbed it. Here the rail
          is always full height, and opening a channel swaps to a view whose own
-         left column is that channel's strip — the same strip, same size. -->
+         left column is that channel. It also hosts the mixer's controls in its
+         select row, so that view needs no bar of its own. -->
     <MixerChannelDetails
       v-if="detailsBus"
       :bus="detailsBus"
@@ -61,32 +25,61 @@
       @delete="onDelete"
       @select="showChannel"
       @close="detailsId = ''"
-    />
-
-    <div v-else class="mixer__body">
-      <div class="mixer__strips">
-        <MixerStrip
-          v-for="bus in userBuses"
-          :key="bus.id"
-          :bus="bus"
-          :selected="bus.id === selectedId"
-          :touch="touch"
-          :output-names="outputNames"
-          @select="selectedId = $event"
-          @open="openDetails"
-          @patch="onPatch"
+    >
+      <template #actions>
+        <MixerActions
+          :mode="mode"
+          :detached="detached"
+          :can-detach="canDetach"
+          @add="addBus"
+          @detach="detach"
+          @mode="$emit('mode', $event)"
+          @close="$emit('close')"
         />
-        <p v-if="userBuses.length === 0" class="mixer__empty">{{ t('mixer.empty') }}</p>
+      </template>
+    </MixerChannelDetails>
+
+    <template v-else>
+      <div class="mixer__body">
+        <div class="mixer__strips">
+          <MixerStrip
+            v-for="bus in userBuses"
+            :key="bus.id"
+            :bus="bus"
+            :selected="bus.id === selectedId"
+            :touch="touch"
+            :output-names="outputNames"
+            @select="selectedId = $event"
+            @open="openDetails"
+            @patch="onPatch"
+          />
+          <p v-if="userBuses.length === 0" class="mixer__empty">{{ t('mixer.empty') }}</p>
+        </div>
+
+        <!-- Master, pinned right — the same component as every other strip, so
+             it has the same rows at the same heights and its fader lines up
+             with theirs. It was bespoke markup here, which is exactly why the
+             one strip that matters most looked unlike all the others. -->
+        <div class="mixer__master">
+          <MixerStrip :bus="masterBus" :touch="touch" :output-names="[]" master />
+        </div>
       </div>
 
-      <!-- Master, pinned right — the same component as every other strip, so
-           it has the same rows at the same heights and its fader lines up
-           with theirs. It was bespoke markup here, which is exactly why the
-           one strip that matters most looked unlike all the others. -->
-      <div class="mixer__master">
-        <MixerStrip :bus="masterBus" :touch="touch" :output-names="[]" master />
-      </div>
-    </div>
+      <!-- One slim bar instead of a title row. A mixer is judged on how much of
+           the window is fader. -->
+      <footer class="mixer__foot">
+        <div class="mixer__spacer"></div>
+        <MixerActions
+          :mode="mode"
+          :detached="detached"
+          :can-detach="canDetach"
+          @add="addBus"
+          @detach="detach"
+          @mode="$emit('mode', $event)"
+          @close="$emit('close')"
+        />
+      </footer>
+    </template>
   </div>
 </template>
 
@@ -95,6 +88,7 @@ import { computed, onMounted, ref } from 'vue';
 import type { Bus } from '~/types/project';
 import MixerStrip from './MixerStrip.vue';
 import MixerChannelDetails from './MixerChannelDetails.vue';
+import MixerActions from './MixerActions.vue';
 
 const props = withDefaults(
   defineProps<{ mode?: 'side' | 'full'; detached?: boolean }>(),
@@ -238,29 +232,16 @@ async function addBus() {
   overflow: hidden;
 }
 
-.mixer__bar {
+.mixer__foot {
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-md);
-  border-bottom: 1px solid var(--color-border);
-}
-.mixer__title { margin: 0; font-size: 14px; color: var(--color-text-primary); }
-.mixer__spacer { flex: 1; }
-.mixer__add,
-.mixer__close {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 4px 8px;
-  color: var(--color-text-secondary);
+  gap: var(--spacing-xs);
+  flex: 0 0 auto;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-top: 1px solid var(--color-border);
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--border-radius-sm);
-  cursor: pointer;
 }
-.mixer__add:hover, .mixer__close:hover { color: var(--color-text-primary); }
+.mixer__spacer { flex: 1; }
 
 .mixer__body { display: flex; flex: 1; min-height: 0; min-width: 0; }
 .mixer__strips {
