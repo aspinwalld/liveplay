@@ -71,10 +71,9 @@
 
         <MixerDynamicsPanel class="det__dyn" />
 
-        <!-- What is connected, both directions. The row is as tall as the
-             sends panel needs and no taller; the contributions list scrolls
-             inside itself, with the count in the heading so the length is
-             known without scrolling it. -->
+        <!-- What is connected, in signal order: what arrives at this bus, then
+             where it goes. Sends takes the height it needs at the bottom and
+             contributions takes the rest, scrolling its list inside itself. -->
         <div class="det__io">
           <section class="det__panel det__contrib">
             <h4 class="det__h">
@@ -270,26 +269,27 @@ function itemName(uuid: string): string {
 
 .det__main { display: flex; flex: 1; min-height: 0; min-width: 0; }
 
-/* Row 1 (EQ | dynamics) sizes to its content, which is now knowable: both
-   graphs have a definite height that scales with the window up to a cap. Row 2
-   (plugin rack | connections) takes whatever is left, so once the EQ stops
-   growing the spare height goes somewhere useful instead of padding out a
-   panel that has finished. minmax(0, 1fr) so it can also shrink to nothing on
-   a short window rather than pushing the grid past the viewport. */
+/* Three columns. EQ and the connection panels each own a full-height column;
+   dynamics and the plugin rack share the middle one.
+
+   The rows are 1fr over auto, which is what makes that work: the rack takes
+   only the height its six slots need, dynamics absorbs the slack above it, and
+   the two full-height columns span both so they fill the window. Sizing the
+   rack row instead would hand the leftover height to six empty slots. */
 .det__work {
   display: grid;
-  grid-template-columns: minmax(340px, 1fr) minmax(430px, 1.15fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.05fr) minmax(220px, 0.75fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: var(--spacing-sm);
   flex: 1;
   min-width: 0;
   padding: var(--spacing-sm);
   overflow: auto;
 }
-.det__eq      { grid-column: 1; grid-row: 1; }
-.det__plugins { grid-column: 1; grid-row: 2; }
+.det__eq      { grid-column: 1; grid-row: 1 / span 2; }
 .det__dyn     { grid-column: 2; grid-row: 1; }
-.det__io      { grid-column: 2; grid-row: 2; }
+.det__plugins { grid-column: 2; grid-row: 2; }
+.det__io      { grid-column: 3; grid-row: 1 / span 2; }
 
 /* Narrow: one column. Everything takes the height it needs and the work area
    scrolls, which is where the EQ graph gets its full height back rather than
@@ -350,17 +350,14 @@ function itemName(uuid: string): string {
   color: var(--color-text-disabled);
 }
 
-/* Three across, two down. The rack no longer has to stay minimal: the EQ above
-   it now has a ceiling, so the slack below it is the rack's to use and the
-   slots grow into it rather than leaving a gap. */
+/* Three across, two down, and no taller than the slots need. The rack sits in
+   the content-sized row precisely so it stays compact — height it took would
+   come out of dynamics above it, and six empty slots are not worth that. */
 .det__plugins { min-height: 0; }
 .det__rack {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  grid-auto-rows: 1fr;
   gap: 4px;
-  flex: 1 1 auto;
-  min-height: 0;
 }
 .det__insert {
   display: flex;
@@ -400,20 +397,19 @@ function itemName(uuid: string): string {
 .det__warn { margin: 0; font-size: 11px; color: var(--color-warning); }
 .det__none { list-style: none; margin: 0; font-size: 11px; color: var(--color-text-disabled); }
 
-/* Contributions and sends sit side by side and stretch to the same height.
-   Which one decides that height matters: a bus can feed a hundred cues, and
-   letting the list drive it would push the panel off the bottom of the window.
-   So the list is taken out of flow — absolutely positioned inside a box with a
-   modest minimum — and the sends panel, whose content is fixed, sets the row
-   height. The count in the heading is what the list length is for. */
+/* Contributions above, sends below, in one full-height column.
+   Sends has fixed content and takes only what it needs; contributions takes
+   the rest and scrolls its list inside itself. A bus can feed a hundred cues,
+   so the list must never be what decides the column's height — the count in
+   the heading is there to tell you the length without scrolling to find it. */
 .det__io {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  align-items: stretch;
+  display: flex;
+  flex-direction: column;
   gap: var(--spacing-sm);
   min-height: 0;
 }
-.det__contrib { min-height: 0; }
+.det__contrib { flex: 1 1 auto; min-height: 90px; }
+.det__io > .det__panel:not(.det__contrib) { flex: 0 0 auto; }
 .det__count {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -424,18 +420,15 @@ function itemName(uuid: string): string {
   border-radius: 8px;
 }
 .det__contriblist {
-  position: relative;
   flex: 1 1 auto;
-  min-height: 44px;
+  min-height: 0;
+  overflow-y: auto;
 }
 .det__items {
-  position: absolute;
-  inset: 0;
   margin: 0;
   padding-left: 16px;
   font-size: 11px;
   color: var(--color-text-primary);
-  overflow-y: auto;
 }
 
 .det__bank {

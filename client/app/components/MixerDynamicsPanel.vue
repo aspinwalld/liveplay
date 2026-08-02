@@ -163,14 +163,13 @@ const compParams = [
   color: var(--color-text-disabled);
 }
 
-/* Kept deliberately tight. Row 1 of the work area is as tall as the taller of
-   this panel and the EQ, so every pixel dynamics does not need is a pixel the
-   plugin rack and the bus lists below get instead. */
+/* The two groups sit centred in whatever height the panel has, packed to the
+   left rather than stretched across it. */
 .dyn__controls {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -183,11 +182,14 @@ const compParams = [
   color: var(--color-text-disabled);
 }
 /* Six controls, always three across, so each processor reads as two tidy rows
-   rather than reflowing into a ragged block as the panel resizes. */
+   rather than reflowing into a ragged block as the panel resizes.
+   Columns are sized to the knobs rather than to the panel: 1fr columns spread
+   the six controls across whatever width was going, which left a group reading
+   as scattered dots instead of a block you can take in at once. */
 .dyn__row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 2px 4px;
-  justify-items: center;
+  grid-template-columns: repeat(3, auto);
+  justify-content: start;
+  gap: 2px 10px;
 }
 </style>

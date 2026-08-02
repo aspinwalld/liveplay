@@ -113,19 +113,18 @@ const handleColor = (i: number) =>
    scrolls rather than the knobs disappearing off the bottom — an EQ you can
    see but not adjust is worse than one you have to scroll to. */
 .eq { min-height: 0; }
-.eq > * { flex: 0 0 auto; }
+.eq > *:not(.eq__graph) { flex: 0 0 auto; }
 
-/* The graph scales with the window between a usable floor and a ceiling past
-   which extra height tells you nothing more about a curve. Sized rather than
-   flexed on purpose: a definite height makes this panel's total height
-   knowable, which is what lets the grid hand the leftover space to the panels
-   below instead of padding this one out.
-   The floor and the vh factor are set against the 720px content floor the
-   window now enforces — at that size the panel comes in around 350px, leaving
-   the row beneath it roughly 270 for the plugin rack and the bus lists. */
+/* EQ owns a full-height column of its own now, so the graph goes back to
+   taking whatever the band controls below it do not. It was pinned to a
+   clamped height when EQ shared a row with dynamics — growing it there stole
+   from the panels underneath, which is no longer true. A curve display is one
+   of the few things that genuinely keeps improving with height, so there is no
+   ceiling; the floor is what stops it collapsing on a short window. */
 .eq__graph {
   position: relative;
-  height: clamp(140px, 22vh, 280px);
+  flex: 1 1 auto;
+  min-height: 140px;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);
   overflow: hidden;

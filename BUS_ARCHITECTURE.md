@@ -600,8 +600,9 @@ that shape carries a reason:
 |---|---|
 | Header | Colour chip, name, width + output summary, delete, back to the rail |
 | Left column | `MixerChannelFader` — ‹ name ›, meters, fader, mute/PFL, HPF/LPF, pan. Full height |
-| Work area, left | **EQ** taking the height, with the **Plugins** rack beneath it at a fixed height |
-| Work area, right | **Dynamics** taking the height, with **Contributions** and **Sends** beneath |
+| Work area, column 1 | **EQ**, full height |
+| Work area, column 2 | **Dynamics** taking the height, **Plugins** rack beneath it at the height its slots need |
+| Work area, column 3 | **Contributions** above **Sends**, full height |
 | Bottom | Channel select row, each tile carrying a live meter, with ‹ › arrows |
 
 **The channel column is not the rail strip.** A rail strip is a dense summary sized to sit twenty
@@ -618,12 +619,20 @@ is a glance along a row. Every cell is a knob *and* a typeable box (`KnobField`)
 by ear and an EQ set from a spec sheet are both real jobs. The frequency axis on the curve is
 logarithmic, so an octave takes the same width everywhere.
 
-**EQ never scrolls its controls.** The band grid keeps its natural height and the graph is *sized*
-rather than flexed — `clamp(150px, 26vh, 300px)`, scaling with the window between a usable floor
-and a ceiling past which extra height says nothing more about a curve. A definite height is what
-makes the panel's total height knowable, which is what lets the grid hand the leftover space to the
-plugin rack and connection panels below instead of padding out a panel that has finished growing.
-An EQ you can see but not adjust is worse than one you have to scroll to reach.
+**EQ never scrolls its controls.** The band grid keeps its natural height and the graph takes
+whatever is left, with a floor so it cannot collapse. It has no ceiling: EQ owns a full-height
+column, so growing it starves nothing, and a curve display is one of the few things that keeps
+improving with height. (It was clamped while EQ shared a row with dynamics, when growing it *did*
+steal from the panels underneath.) An EQ you can see but not adjust is worse than one you have to
+scroll to reach.
+
+**The rows are `1fr auto`, not the reverse.** The plugin rack takes only the height its six slots
+need and dynamics absorbs the slack above it. Sizing the rack row instead would hand the leftover
+height to six empty slots.
+
+**Dynamics packs its knobs rather than spreading them.** The control grids are `repeat(3, auto)`
+justified to the start, not `1fr` columns — `1fr` spread six controls across whatever width was
+going, which left a group reading as scattered dots instead of a block you take in at once.
 
 **The gate and the compressor share one transfer graph, but not their meters.** They act on the
 same axis — input level in, output level out — and one curve is how you see what the pair actually
@@ -655,10 +664,11 @@ have. Only `grid-template-rows` changes in the height case: an earlier version a
 because the auto-placement cursor never moves backwards, dynamics landed in column 2 *row 2* beside
 the plugin rack instead of at the top.
 
-**Contributions is capped by Sends, not the other way round.** A bus can feed a hundred cues, so
-letting that list drive the row height would push the panel off the bottom of the window. The list
-is taken out of flow and scrolls inside itself; the sends panel, whose content is fixed, sets the
-height. The count in the contributions heading is what the list length is for.
+**Contributions above Sends, in signal order** — what arrives, then where it goes. Sends has fixed
+content and takes only what it needs at the bottom; contributions takes the rest and scrolls its
+list inside itself. A bus can feed a hundred cues, so that list must never be what decides the
+column's height. The count in the contributions heading is there to give the length without
+scrolling to find it.
 
 **The select row along the bottom carries meters.** The point of the row is knowing which channel to
 go to, and on a desk that judgement is made by watching level, not by reading names. No scale — at
