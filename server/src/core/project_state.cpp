@@ -1829,8 +1829,12 @@ json ProjectState::items_page(std::size_t offset, std::size_t limit) const {
 
 bool ProjectState::replace_full_document(const json& doc) {
     if (!doc.is_object()) return false;
+    bool buses_unchanged = false;
     {
         std::lock_guard lock{mutex_};
+        // What the buses looked like before this document landed, so an
+        // ordinary save can be told apart from a genuine project change.
+        const json buses_before = document_.contains("buses") ? document_["buses"] : json{};
         // A document that does not mention buses is not asserting that there
         // are none — the client round-trips the project on every ordinary save
         // and does not carry the bus list, so taking absence literally wiped
@@ -1859,9 +1863,28 @@ bool ProjectState::replace_full_document(const json& doc) {
         // the new one would resolve against stale definitions.
         load_buses_locked();
         write_buses_to_document_locked();
+        // Nothing about the buses moved, and every one of them already has a
+        // strip: there is nothing to rebuild.
+        //
+        // The client round-trips the whole project on every ordinary save, so
+        // without this check a single property edit tore down every bus strip
+        // and wired it up again — re-opening audio devices, dropping the audio
+        // running through those buses for the length of the rebuild, and
+        // logging a full materialise each time. Saving a project should not
+        // interrupt what is playing through it.
+        buses_unchanged = !buses_before.is_null() && buses_before == document_["buses"];
+        if (buses_unchanged) {
+            for (const auto& b : buses_) {
+                const auto it = bus_routings_.find(b.id);
+                if (it == bus_routings_.end() || it->second.mixer.empty()) {
+                    buses_unchanged = false;
+                    break;
+                }
+            }
+        }
     }
     // Rebuild the engine strips for the new document's buses. Outside the lock.
-    materialise_buses();
+    if (!buses_unchanged) materialise_buses();
     // Kick off the engine mirror asynchronously — matches load_from_json's
     // path so the PUT /api/project/document handler doesn't block on cue
     // decode for large projects. start_async_mirror() takes mutex_ itself,
@@ -3533,6 +3556,9 @@ std::string bus_id_from_name(const std::string& name) {
 
 void ProjectState::load_buses_locked() {
     buses_.clear();
+    // The bus list is about to change, so anything previously reported as
+    // unknown is worth reporting again if it is still unknown afterwards.
+    warned_unknown_buses_.clear();
     std::unordered_set<std::string> seen;
 
     if (document_.contains("buses") && document_["buses"].is_array()) {
@@ -4354,8 +4380,17 @@ std::string ProjectState::resolve_item_bus(const std::string& item_uuid) const {
     for (const auto& b : buses_) {
         if (b.id == found) return found;
     }
-    Logger::warn("resolve_item_bus: item '{}' names unknown bus '{}'; using Main",
-                 item_uuid, found);
+    // Once per unknown bus id, not once per item per resolve. This runs for
+    // every item on every save and every mixer poll, so a project carrying a
+    // few stale assignments produced a steady stream of identical warnings —
+    // the kind of noise that hides the one line that matters mid-show. The set
+    // is cleared whenever the bus list is reloaded, so a genuine change says
+    // so again.
+    if (warned_unknown_buses_.insert(found).second) {
+        Logger::warn("resolve_item_bus: item '{}' names unknown bus '{}'; using Main. "
+                     "The assignment is kept, so it takes effect again if that bus returns.",
+                     item_uuid, found);
+    }
     return kMainBusId;
 }
 

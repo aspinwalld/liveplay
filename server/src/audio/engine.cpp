@@ -330,6 +330,28 @@ DeviceId AudioEngine::open_default_device(ChannelCount output_channels) {
 
 DeviceId AudioEngine::open_device_by_name(const std::string& name_substring,
                                           ChannelCount output_channels) {
+    // Hand back a device already open on the same hardware rather than opening
+    // a second handle to it.
+    //
+    // Nothing here ever closed one, so every caller minted a fresh ma_device:
+    // wiring a stereo bus opened the same card twice (once per channel), and
+    // re-materialising the buses — which a project save does — opened two more
+    // every time. The handles accumulated for the life of the process, each
+    // with its own callback pulling from one render thread, which is what the
+    // "Ring underrun" storm was.
+    //
+    // Sharing is safe because routing never closes a device; only the explicit
+    // DELETE /api/devices endpoint does.
+    {
+        const std::string want = name_substring.empty() ? "Default Output" : name_substring;
+        std::lock_guard lock{mutex_};
+        for (const auto& d : devices_) {
+            if (d->display_name == want && d->channels == output_channels) {
+                return d->id;
+            }
+        }
+    }
+
     auto dev = std::make_unique<Device>();
     dev->id           = DeviceId{gen_uuid_like()};
     dev->channels     = output_channels;

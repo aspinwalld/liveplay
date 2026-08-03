@@ -626,6 +626,11 @@ private:
     };
     std::unordered_map<std::string, BusRouting> bus_routings_;
 
+    // Bus ids already reported as unknown, so an item pointing at a bus that
+    // no longer exists is logged once rather than on every save and every
+    // mixer poll. Cleared by load_buses_locked(). Guarded by mutex_.
+    mutable std::unordered_set<std::string> warned_unknown_buses_;
+
     // Master pairs handed back by deleted or rewired buses. Reused before the
     // monotonic counter grows — without this, repeatedly changing a bus's
     // output would walk the counter into the preview reserve and exhaust it.
