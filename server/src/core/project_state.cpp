@@ -2013,7 +2013,11 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
     bool touched            = false;
     bool media_path_changed = false;
     bool ltc_changed        = false;
+    bool bus_changed        = false;
     json* updated_item = nullptr;
+    // Items whose routing this edit moves: the item itself, or — when a group's
+    // assignment changes — every audio descendant that inherits from it.
+    std::vector<std::string> rerouted;
 
     // Captured under mutex_, applied to the engine loop state and the sequencer
     // snapshot AFTER the lock is released — so out point / crossfade / stop-fade /
@@ -2047,6 +2051,9 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
                         k == "ltcFrameRate") {
                         if (!it.contains(k) || it[k] != v)
                             ltc_changed = true;
+                    }
+                    if (k == "busId") {
+                        if (!it.contains(k) || it[k] != v) bus_changed = true;
                     }
                     it[k] = v;
                 }
@@ -2134,6 +2141,31 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
             }
         }
 
+        // Collect who this assignment moves. An item carries its own routing;
+        // a group carries it for every descendant that doesn't override it, so
+        // re-assigning a group has to move all of them. resolve_item_bus works
+        // the inheritance out per item, so this only needs the candidates.
+        if (touched && bus_changed && updated_item) {
+            if (updated_item->value("type", std::string{}) == "group") {
+                std::function<void(const json&)> walk = [&](const json& arr) {
+                    if (!arr.is_array()) return;
+                    for (const auto& child : arr) {
+                        if (!child.is_object()) continue;
+                        if (child.value("type", std::string{}) == "audio") {
+                            const auto u = child.value("uuid", std::string{});
+                            if (!u.empty()) rerouted.push_back(u);
+                        } else if (child.value("type", std::string{}) == "group" &&
+                                   child.contains("children")) {
+                            walk(child["children"]);
+                        }
+                    }
+                };
+                if (updated_item->contains("children")) walk((*updated_item)["children"]);
+            } else {
+                rerouted.push_back(uuid);
+            }
+        }
+
         // Snapshot the sequencing-relevant fields so the playing cue's
         // auto-advance/crossfade/stop-fade/loop timing can be refreshed live
         // (done below, after releasing mutex_, to keep the existing lock order).
@@ -2189,9 +2221,18 @@ bool ProjectState::update_item(const std::string& uuid, const json& patch) {
         }
     }
 
+    // A bus assignment now takes effect on the cue immediately, rather than
+    // waiting for the next time it happens to be fired. It re-establishes LTC
+    // itself, so this runs before the LTC branch and makes it redundant.
+    if (!rerouted.empty()) {
+        reroute_items_to_buses(rerouted);
+        Logger::info("update_item: '{}' bus changed — re-routed {} cue(s) live",
+                     uuid, rerouted.size());
+    }
+
     // Route (or re-route) the LTC channel after releasing mutex_ so
     // ensure_device_routing() can safely acquire it.
-    if (touched && ltc_changed)
+    if (touched && ltc_changed && rerouted.empty())
         apply_ltc_device_routing();
     return touched;
 }
@@ -3463,6 +3504,35 @@ ProjectState::ensure_device_routing(const std::string& device_name) {
     Logger::info("ensure_device_routing: '{}' → mixer '{}' (masters {}/{})",
                  device_name, mixer.value, master_l, master_r);
     return mixer;
+}
+
+void ProjectState::reroute_items_to_buses(const std::vector<std::string>& item_uuids) {
+    // Resolve everything under the lock, route with it released: route_cue_to_-
+    // mixer calls into the engine, which takes its own.
+    std::vector<std::pair<audio::CueId, audio::MixerChannelId>> moves;
+    {
+        std::lock_guard lock{mutex_};
+        for (const auto& uuid : item_uuids) {
+            const auto cit = item_uuid_to_cue_.find(uuid);
+            if (cit == item_uuid_to_cue_.end()) continue;   // not loaded; play_item will route it
+            const auto mixer = mixer_for_bus(resolve_item_bus(uuid));
+            if (mixer.empty()) continue;
+            moves.emplace_back(cit->second, mixer);
+        }
+    }
+
+    // Moving a cue between buses is a re-patch, not a fade. It is seamless in
+    // the ordinary case — the samples simply arrive at the master through a
+    // different accumulator, at the same gain — and audibly abrupt only when
+    // the two buses differ in level, mute or output, which is precisely the
+    // change the operator just asked for.
+    for (const auto& [cue, mixer] : moves) route_cue_to_mixer(cue, mixer);
+
+    // route_cue_to_mixer drops every item->mixer route this cue had, the
+    // synthetic LTC channel included, so timecode has to be re-established or
+    // re-assigning the bus of an LTC-enabled cue would silently kill its
+    // output. Same call play_item makes straight after routing.
+    if (!moves.empty()) apply_ltc_device_routing();
 }
 
 void ProjectState::route_cue_to_mixer(const audio::CueId& cue,

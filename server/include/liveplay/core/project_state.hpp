@@ -401,6 +401,15 @@ public:
     void route_cue_to_mixer(const audio::CueId& cue,
                             const audio::MixerChannelId& mixer);
 
+    // Send each of these items' loaded cues to whatever bus they now resolve
+    // to. Caller must NOT hold mutex_ (this routes through the engine).
+    //
+    // Routing used to be established only in play_item(), so re-assigning a
+    // cue's bus did nothing until the next time it was fired — the mixer said
+    // one thing and the audio did another. Pass a group's uuid to move every
+    // audio descendant that inherits from it.
+    void reroute_items_to_buses(const std::vector<std::string>& item_uuids);
+
     // ---- Preview --------------------------------------------------------
     // Play an item through the configured preview device (project
     // settings.previewDevice). This is independent of the main project
