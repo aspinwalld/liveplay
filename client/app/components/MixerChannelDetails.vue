@@ -79,7 +79,12 @@
           </div>
         </section>
 
-        <MixerDynamicsPanel class="det__dyn" :bus="curveBus" />
+        <MixerDynamicsPanel
+        class="det__dyn"
+        :bus="curveBus"
+        @patch="(id: string, p: Partial<Bus>) => $emit('patch', id, p)"
+        @dsp-live="onDspLive"
+      />
 
         <!-- What is connected, in signal order: what arrives at this bus, then
              where it goes. Sends takes the height it needs at the bottom and

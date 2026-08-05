@@ -178,7 +178,12 @@ const masterBus = computed<Bus>(() => ({
   mute: false,
   pan: 0,
   pfl: false,
-  dsp: { hpf: { freq: 20, q: 0.7071 }, lpf: { freq: 20000, q: 0.7071 } },
+  dsp: {
+    eqEnabled: true, dynEnabled: true,
+    hpf: { freq: 20, q: 0.7071 }, lpf: { freq: 20000, q: 0.7071 },
+    eq: [], gate: { on: false, threshold: -40, ratio: 2, range: -20,
+                    attack: 1, hold: 10, release: 100 },
+  },
   bound: true,
   system: true,
   output: { type: 'output', target: '' },

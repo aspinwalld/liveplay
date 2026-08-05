@@ -185,7 +185,24 @@ export interface BusEqBand {
   q: number;
 }
 
-/** The strip's tone controls. Dynamics join this as they land. */
+/**
+ * The expander / gate.
+ *
+ * `attack` opens the gate and `release` closes it — the opposite of what those
+ * words mean on a compressor. `range` is the deepest attenuation, so the gate
+ * ducks rather than slamming to silence.
+ */
+export interface BusGate {
+  on: boolean;
+  threshold: number;
+  ratio: number;
+  range: number;
+  attack: number;
+  hold: number;
+  release: number;
+}
+
+/** The strip's tone controls. The compressor joins this next. */
 export interface BusDsp {
   /**
    * Section bypass. Distinct from every band being flat: it takes the whole
@@ -198,6 +215,7 @@ export interface BusDsp {
   hpf: BusFilter;
   lpf: BusFilter;
   eq: BusEqBand[];
+  gate: BusGate;
 }
 
 /** Band names, in order. Fixed layout, so the surface can label the columns. */

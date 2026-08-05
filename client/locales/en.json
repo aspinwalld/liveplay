@@ -605,7 +605,7 @@
     "filterParked": "Parked at the end of its travel — out of circuit. Turn it in, or double-click to park it again.",
     "bypass": "BYP",
     "bypassHint": "Take this section out of circuit. The settings are kept, so switching it back in restores exactly what was there.",
-    "bypassPending": "Bypass will apply once dynamics processing is implemented.",
+    "gateToggle": "Switch the expander/gate in or out. Separate from the section bypass above.",
     "freq": "Freq",
     "gain": "Gain",
     "q": "Q",
