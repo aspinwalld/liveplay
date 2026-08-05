@@ -1240,7 +1240,7 @@ void AudioEngine::render_one_block(const Topology& topo) {
     // flat report inactive and cost nothing, which is most of them.
     for (std::size_t i = 0; i < active_mixers.size(); ++i) {
         auto& dsp = active_mixers[i]->dsp();
-        if (!dsp.active()) continue;
+        if (!dsp.needs_processing()) continue;
         dsp.advance_coeffs();            // once per block, so both lanes match
         for (ChannelIndex lane = 0; lane < kMixerLanes; ++lane) {
             dsp.process_block(lane, mixer_accumulators_[i * kMixerLanes + lane].data(), block);

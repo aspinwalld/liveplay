@@ -45,6 +45,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 namespace liveplay::audio {
 
@@ -120,9 +121,26 @@ public:
         any_active_.store(needs_processing(p), std::memory_order_release);
     }
 
-    // Whether anything in the chain is doing something. Lets the render loop
-    // skip a strip whose tone controls are all flat, which is most of them.
-    bool active() const noexcept { return any_active_.load(std::memory_order_acquire); }
+    // Whether the render loop needs to run this chain for the coming block.
+    //
+    // True while anything is doing something — and for a short tail after it
+    // stops, so the coefficients can ramp out. Without that tail, flattening
+    // the last band would drop the chain out of circuit in a single sample and
+    // a +12 dB boost would end in a click, which is the very thing the ramp
+    // exists to avoid. Render thread only: it owns the settle counter.
+    bool needs_processing() noexcept {
+        const std::uint32_t gen = generation_.load(std::memory_order_acquire);
+        if (gen != seen_generation_) {
+            seen_generation_ = gen;
+            settle_blocks_   = kSettleBlocks;
+        }
+        if (any_active_.load(std::memory_order_acquire)) {
+            settle_blocks_ = kSettleBlocks;   // stays hot while it is in use
+            return true;
+        }
+        if (settle_blocks_ > 0) { --settle_blocks_; return true; }
+        return false;
+    }
 
     // ---- Render thread ----------------------------------------------------
     // Advance the coefficient ramp by one block. Call once per block, before
@@ -188,16 +206,29 @@ private:
         const unsigned next = 1u - published_.load(std::memory_order_relaxed);
         slots_[next] = c;
         published_.store(next, std::memory_order_release);
+        // Tells the render thread something moved, so it keeps running the
+        // chain long enough to ramp onto the new coefficients even if the new
+        // ones are flat.
+        generation_.fetch_add(1, std::memory_order_release);
     }
+
+    // Long enough for the 0.25-per-block ramp to converge (0.75^64 is far
+    // below anything audible) with room to spare. At 256 frames and 48 kHz
+    // this is about a third of a second of tail on a strip that has just gone
+    // flat — irrelevant next to the cost of the strips that are still working.
+    static constexpr int kSettleBlocks = 64;
     const StripCoeffs& slot(unsigned i) const noexcept { return slots_[i & 1u]; }
 
     SampleRate  sample_rate_ = kDefaultMixSampleRate;
     StripCoeffs slots_[2]{};
-    std::atomic<unsigned> published_{0};
-    std::atomic<bool>     any_active_{false};
+    std::atomic<unsigned>      published_{0};
+    std::atomic<bool>          any_active_{false};
+    std::atomic<std::uint32_t> generation_{0};
 
-    StripCoeffs                       active_{};   // render thread only
-    std::array<LaneState, kMixerLanes> state_{};   // render thread only
+    StripCoeffs                       active_{};          // render thread only
+    std::array<LaneState, kMixerLanes> state_{};          // render thread only
+    std::uint32_t                     seen_generation_{0}; // render thread only
+    int                               settle_blocks_{0};   // render thread only
 };
 
 } // namespace liveplay::audio

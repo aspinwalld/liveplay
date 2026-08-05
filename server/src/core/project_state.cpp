@@ -3611,6 +3611,44 @@ void ProjectState::release_device_routings_locked() {
 // engine strips whenever a project loads.
 // ---------------------------------------------------------------------------
 namespace {
+} // namespace
+
+// Declared in the header: the control server serialises buses too.
+void merge_bus_dsp(const json& src, BusDsp& out) {
+    if (!src.is_object()) return;
+    const auto filter = [](const json& f, BusFilter& o) {
+        if (!f.is_object()) return;
+        o.freq_hz = f.value("freq", o.freq_hz);
+        o.q       = std::clamp(f.value("q", o.q), 0.1f, 40.0f);
+    };
+    if (src.contains("hpf")) filter(src["hpf"], out.hpf);
+    if (src.contains("lpf")) filter(src["lpf"], out.lpf);
+    if (src.contains("eq") && src["eq"].is_array()) {
+        const auto& arr = src["eq"];
+        for (std::size_t i = 0; i < kBusEqBands && i < arr.size(); ++i) {
+            if (!arr[i].is_object()) continue;
+            auto& b = out.eq[i];
+            b.freq_hz = arr[i].value("freq", b.freq_hz);
+            b.gain_db = std::clamp(arr[i].value("gain", b.gain_db), -24.0f, 24.0f);
+            b.q       = std::clamp(arr[i].value("q", b.q), 0.1f, 40.0f);
+        }
+    }
+}
+
+json bus_dsp_to_json(const BusDsp& d) {
+    json eq = json::array();
+    for (const auto& b : d.eq) {
+        eq.push_back(json{{"freq", b.freq_hz}, {"gain", b.gain_db}, {"q", b.q}});
+    }
+    return json{
+        {"hpf", json{{"freq", d.hpf.freq_hz}, {"q", d.hpf.q}}},
+        {"lpf", json{{"freq", d.lpf.freq_hz}, {"q", d.lpf.q}}},
+        {"eq",  std::move(eq)},
+    };
+}
+
+namespace {
+
 // Human-readable, stable-ish bus id derived from a name, so the document stays
 // legible instead of carrying opaque uuids. Uniqueness is the caller's problem.
 std::string bus_id_from_name(const std::string& name) {
@@ -3644,16 +3682,7 @@ void ProjectState::load_buses_locked() {
             d.gain_db      = b.value("gainDb", 0.0f);
             d.muted        = b.value("mute", false);
             d.pan          = std::clamp(b.value("pan", 0.0f), -1.0f, 1.0f);
-            if (b.contains("dsp") && b["dsp"].is_object()) {
-                const auto& dsp = b["dsp"];
-                const auto filter = [](const json& src, float parked, BusFilter& out) {
-                    if (!src.is_object()) return;
-                    out.freq_hz = src.value("freq", parked);
-                    out.q       = std::clamp(src.value("q", 0.70710678f), 0.1f, 40.0f);
-                };
-                if (dsp.contains("hpf")) filter(dsp["hpf"], kHpfParkedHz, d.dsp.hpf);
-                if (dsp.contains("lpf")) filter(dsp["lpf"], kLpfParkedHz, d.dsp.lpf);
-            }
+            if (b.contains("dsp")) merge_bus_dsp(b["dsp"], d.dsp);
             if (b.contains("output") && b["output"].is_object()) {
                 const auto& out = b["output"];
                 const auto kind = out.value("type", std::string{"master"});
@@ -3802,10 +3831,7 @@ void ProjectState::write_buses_to_document_locked() {
             {"gainDb", b.gain_db},
             {"mute",   b.muted},
             {"pan",    b.pan},
-            {"dsp",    json{
-                {"hpf", json{{"freq", b.dsp.hpf.freq_hz}, {"q", b.dsp.hpf.q}}},
-                {"lpf", json{{"freq", b.dsp.lpf.freq_hz}, {"q", b.dsp.lpf.q}}},
-            }},
+            {"dsp",    bus_dsp_to_json(b.dsp)},
             {"output", json{{"type", kind}, {"target", b.output_target}}},
         });
     }
@@ -3932,6 +3958,18 @@ audio::StripDspParams ProjectState::dsp_params_for(const BusDef& bus) {
     p.lpf.freq_hz = bus.dsp.lpf.freq_hz > 0.0f ? bus.dsp.lpf.freq_hz : kLpfParkedHz;
     p.lpf.q       = bus.dsp.lpf.q;
     p.lpf.enabled = p.lpf.freq_hz < kLpfParkedHz;
+
+    // A band at 0 dB is an identity whatever its Q, so it is left out of
+    // circuit rather than run to achieve nothing. ChannelDsp checks the gain
+    // again on its side; this keeps the two honest about the same rule.
+    for (std::size_t i = 0; i < kBusEqBands && i < audio::kEqBands; ++i) {
+        const auto& src = bus.dsp.eq[i];
+        auto&       dst = p.eq[i];
+        dst.freq_hz = src.freq_hz;
+        dst.gain_db = src.gain_db;
+        dst.q       = src.q;
+        dst.enabled = src.gain_db != 0.0f;
+    }
     return p;
 }
 
@@ -3950,15 +3988,7 @@ bool ProjectState::set_bus_dsp_live(const std::string& id, const json& dsp) {
 
     // Deliberately not written back to buses_, exactly as pan is not. patch_bus
     // persists the settled value and re-applies the same coefficients.
-    if (dsp.is_object()) {
-        const auto filter = [](const json& src, float parked, BusFilter& out) {
-            if (!src.is_object()) return;
-            out.freq_hz = src.value("freq", parked);
-            out.q       = std::clamp(src.value("q", out.q), 0.1f, 40.0f);
-        };
-        if (dsp.contains("hpf")) filter(dsp["hpf"], kHpfParkedHz, def.dsp.hpf);
-        if (dsp.contains("lpf")) filter(dsp["lpf"], kLpfParkedHz, def.dsp.lpf);
-    }
+    merge_bus_dsp(dsp, def.dsp);
     engine_.set_mixer_dsp(mixer, dsp_params_for(def));
     return true;
 }
@@ -4362,15 +4392,8 @@ ProjectState::PatchBusResult ProjectState::patch_bus(const std::string& id,
                 const float p = std::clamp(patch.value("pan", b.pan), -1.0f, 1.0f);
                 if (p != b.pan) { b.pan = p; pan_moved = true; }
             }
-            if (patch.contains("dsp") && patch["dsp"].is_object()) {
-                const auto& dsp = patch["dsp"];
-                const auto filter = [](const json& src, BusFilter& out) {
-                    if (!src.is_object()) return;
-                    out.freq_hz = src.value("freq", out.freq_hz);
-                    out.q       = std::clamp(src.value("q", out.q), 0.1f, 40.0f);
-                };
-                if (dsp.contains("hpf")) filter(dsp["hpf"], b.dsp.hpf);
-                if (dsp.contains("lpf")) filter(dsp["lpf"], b.dsp.lpf);
+            if (patch.contains("dsp")) {
+                merge_bus_dsp(patch["dsp"], b.dsp);
                 dsp_moved = true;
             }
             if (patch.contains("output") && patch["output"].is_object()) {

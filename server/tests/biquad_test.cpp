@@ -277,7 +277,12 @@ void test_chain_transparency() {
     // circuit at 0 dB is the default state of every bus on it.
     ChannelDsp dsp;
     dsp.configure(48000);
-    check_true("chain: a flat chain reports itself inactive", !dsp.active());
+    // A freshly published chain keeps running for a short tail so it can ramp
+    // onto its coefficients; once that expires a flat chain drops out of the
+    // render loop entirely, which is what makes an untouched desk free.
+    int blocks = 0;
+    while (dsp.needs_processing() && blocks < 1000) ++blocks;
+    check_true("chain: a flat chain stops needing processing", blocks < 1000);
 
     constexpr std::size_t kBlock = 256;
     std::vector<Sample> buf(kBlock), orig(kBlock);
@@ -302,7 +307,7 @@ void test_chain_hpf() {
     p.hpf.enabled = true;
     p.hpf.freq_hz = 200.0f;
     dsp.set_params(p);
-    check_true("chain: enabling the HPF marks the strip active", dsp.active());
+    check_true("chain: enabling the HPF marks the strip active", dsp.needs_processing());
 
     check_near("chain: HPF passes 2 kHz",      chain_response_db(dsp, 0, 2000.0), 0.0, 0.2);
     check_near("chain: HPF is -3 dB at 200 Hz", chain_response_db(dsp, 0, 200.0), -3.01, 0.2);
@@ -357,6 +362,44 @@ void test_chain_param_handover() {
     check_near("chain: disabling restores it", chain_response_db(dsp, 0, 60.0), 0.0, 0.2);
 }
 
+void test_chain_ramps_out() {
+    // Going flat must not drop the chain out of circuit in a single sample.
+    // A +12 dB band vanishing instantly is a click, which is exactly what the
+    // coefficient ramp exists to prevent — so the chain keeps running for a
+    // tail after the last band flattens, long enough to ramp back to unity.
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    while (dsp.needs_processing()) {}            // drain the start-up tail
+
+    StripDspParams boosted;
+    boosted.eq[1] = {true, 1000.0f, 12.0f, 1.0f};
+    dsp.set_params(boosted);
+    check_true("ramp: a boosted chain needs processing", dsp.needs_processing());
+
+    // Flatten it and count how long it keeps being served.
+    dsp.set_params(StripDspParams{});
+    int tail = 0;
+    while (dsp.needs_processing() && tail < 1000) ++tail;
+    check_true("ramp: a flattened chain keeps running while it ramps out", tail > 20);
+    check_true("ramp: and then stops", tail < 1000);
+
+    // The tail must land on unity, not leave a fraction of the boost behind.
+    constexpr std::size_t kBlock = 256;
+    std::vector<Sample> buf(kBlock), orig(kBlock);
+    double worst = 0.0;
+    for (int b = 0; b < 20; ++b) {
+        for (std::size_t s = 0; s < kBlock; ++s) {
+            orig[s] = static_cast<float>(0.5 * std::sin(2.0 * kPi * 1000.0 * (b * kBlock + s) / kFs));
+            buf[s]  = orig[s];
+        }
+        dsp.advance_coeffs();
+        dsp.process_block(0, buf.data(), kBlock);
+        for (std::size_t s = 0; s < kBlock; ++s)
+            worst = std::max(worst, std::fabs(static_cast<double>(buf[s] - orig[s])));
+    }
+    check_true("ramp: settles back to exactly unity", worst < 1e-6);
+}
+
 void test_chain_eq_bands_cascade() {
     // Four bands in series, two of them doing something at once.
     ChannelDsp dsp;
@@ -388,6 +431,7 @@ int main() {
     test_chain_hpf();
     test_chain_lane_independence();
     test_chain_param_handover();
+    test_chain_ramps_out();
     test_chain_eq_bands_cascade();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES",

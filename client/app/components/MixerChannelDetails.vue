@@ -56,7 +56,12 @@
            alongside the EQ bands, and those live on the fader column. It gets
            the live-merged copy so it tracks a filter knob while it is moving,
            not 250 ms later when the value settles onto the bus. -->
-      <MixerEqPanel class="det__eq" :bus="curveBus" />
+      <MixerEqPanel
+        class="det__eq"
+        :bus="curveBus"
+        @patch="(id: string, p: Partial<Bus>) => $emit('patch', id, p)"
+        @dsp-live="onDspLive"
+      />
 
         <!-- Static height, packed as tight as the slots allow: the rack is a
              list of six things, not a workspace, so it should never take room
@@ -213,13 +218,18 @@ const { findItemByUuid } = useProject();
 // in-flight value has to cross between them. It is held here, at their nearest
 // common parent, rather than in shared module state — this is the only place
 // that needs to know, and it clears itself when the channel changes.
-const liveDsp = ref<BusDsp | null>(null);
+const liveDsp = ref<Partial<BusDsp> | null>(null);
 watch(() => props.bus?.id, () => { liveDsp.value = null; });
 // Once the settled value has landed on the bus, stop overriding with a stale
 // copy of the same thing.
 watch(() => props.bus?.dsp, () => { liveDsp.value = null; }, { deep: true });
 
-function onDspLive(dsp: BusDsp) { liveDsp.value = dsp; }
+// Merged rather than replaced: the filters come from the fader column and the
+// EQ bands from the panel, and dragging one must not drop the other's
+// in-flight value out of the curve.
+function onDspLive(dsp: Partial<BusDsp>) {
+  liveDsp.value = { ...(liveDsp.value ?? {}), ...dsp };
+}
 
 const curveBus = computed<Bus | null>(() => {
   if (!props.bus) return null;

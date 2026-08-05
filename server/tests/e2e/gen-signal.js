@@ -17,15 +17,30 @@
 const fs = require('fs');
 
 const fs_hz = 48000, secs = 120, ch = 2, amp = 0.5;   // 0.5 = -6.02 dBFS
-const F_LO = 200, F_HI = 2000, SWEEP_SECS = 5;
+// A one-second cycle, so a measurement window of a whole number of seconds
+// covers exactly the same spectral content wherever it happens to start.
+//
+// At five seconds it did not: a 1.2 s window caught a different slice of the
+// sweep each time, and three measurements of an identical flat chain read
+// -9.1, -9.0 and -8.4 dB. That looked like an EQ band failing to flatten and
+// was purely the measurement moving underneath it.
+const F_LO = 200, F_HI = 2000, SWEEP_SECS = 1;
 const n = fs_hz * secs;
 const data = Buffer.alloc(n * ch * 2);
 let phase = 0;
 for (let i = 0; i < n; i++) {
-  // Phase accumulated from the instantaneous frequency, so the sweep restarts
-  // without a click at the wrap.
-  const t = (i / fs_hz) % SWEEP_SECS;
-  const f = F_LO + (F_HI - F_LO) * (t / SWEEP_SECS);
+  // The frequency sweeps UP then back DOWN, a triangle rather than a sawtooth.
+  //
+  // Phase is accumulated either way, so there is never a phase discontinuity,
+  // but a sawtooth still jumps 2 kHz -> 200 Hz once per cycle and that jump in
+  // frequency is a broadband click. A measurement window that happened to
+  // catch one read about 0.3 dB hot, reproducibly, which looked like an EQ
+  // band failing to flatten and was nothing of the kind. A triangle has no
+  // seam to catch.
+  const t   = (i / fs_hz) % SWEEP_SECS;
+  const ramp = t / SWEEP_SECS;                       // 0..1
+  const tri  = ramp < 0.5 ? ramp * 2 : (1 - ramp) * 2;
+  const f    = F_LO + (F_HI - F_LO) * tri;
   phase += 2 * Math.PI * f / fs_hz;
   const s = Math.round(amp * 32767 * Math.sin(phase));
   data.writeInt16LE(s, (i * ch) * 2);

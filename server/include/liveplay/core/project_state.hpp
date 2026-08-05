@@ -24,6 +24,7 @@
 #include "liveplay/audio/types.hpp"
 #include "liveplay/core/output_map.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -98,15 +99,49 @@ struct BusFilter {
     float q       = 0.70710678f;
 };
 
+// One EQ band. All four are bells.
+//
+// A band sitting at 0 dB is out of circuit, for the same reason a parked
+// filter is: a peaking section at unity gain is an identity whatever its Q, so
+// running it would cost arithmetic to achieve nothing and four flat bands on
+// every strip must not colour the desk.
+//
+// The outer bands are bells rather than shelves because the surface gives all
+// four a Q control, and Q on a shelf means something different enough that the
+// same knob would be lying on two of them. Shelving LF/HF is the conventional
+// next step and the sections are already written and tested; it needs one more
+// control per band to say which it is.
+struct BusEqBand {
+    float freq_hz = 1000.0f;
+    float gain_db = 0.0f;
+    float q       = 1.0f;
+};
+
+inline constexpr std::size_t kBusEqBands = 4;
+
 struct BusDsp {
     BusFilter hpf{20.0f};       // parked at the bottom: out of circuit
     BusFilter lpf{20000.0f};    // parked at the top: out of circuit
+    // Conventional four-band starting layout, matching what the surface shows.
+    std::array<BusEqBand, kBusEqBands> eq{{
+        {100.0f,   0.0f, 0.7f},
+        {500.0f,   0.0f, 1.0f},
+        {2500.0f,  0.0f, 1.0f},
+        {10000.0f, 0.0f, 0.7f},
+    }};
 };
 
 // Where the filters sit when they are doing nothing. Shared with the client,
 // which draws the same parked positions on its knobs.
 inline constexpr float kHpfParkedHz = 20.0f;
 inline constexpr float kLpfParkedHz = 20000.0f;
+
+// Merge a JSON "dsp" object into a BusDsp, leaving anything it does not
+// mention alone. One implementation because four callers need exactly this —
+// loading a document, patching a bus, the live drag endpoint, and the REST
+// list — and a partial update has to be partial in all of them.
+void merge_bus_dsp(const json& src, BusDsp& out);
+json bus_dsp_to_json(const BusDsp& d);
 
 struct BusDef {
     std::string   id;

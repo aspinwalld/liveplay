@@ -175,11 +175,25 @@ export interface BusFilter {
   q: number;
 }
 
-/** The strip's tone controls. EQ bands and dynamics join this as they land. */
+/**
+ * One EQ band. All four are bells; a band at 0 dB gain is out of circuit,
+ * because a peaking section at unity is an identity whatever its Q.
+ */
+export interface BusEqBand {
+  freq: number;
+  gain: number;
+  q: number;
+}
+
+/** The strip's tone controls. Dynamics join this as they land. */
 export interface BusDsp {
   hpf: BusFilter;
   lpf: BusFilter;
+  eq: BusEqBand[];
 }
+
+/** Band names, in order. Fixed layout, so the surface can label the columns. */
+export const EQ_BAND_NAMES = ['LF', 'LMF', 'HMF', 'HF'] as const;
 
 /** Where the filters sit when out of circuit. Must match the server's. */
 export const HPF_PARKED_HZ = 20;

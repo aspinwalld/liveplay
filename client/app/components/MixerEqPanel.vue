@@ -34,11 +34,18 @@
              the same way stops them thickening as the panel grows. -->
         <polyline class="eq__curve" :points="curvePoints" />
       </svg>
+      <!-- A handle sits at its band's frequency and rides its gain, so the
+           marker is on the part of the curve it made. -->
       <span
-        v-for="(b, i) in bands" :key="'h' + b.id"
+        v-for="(b, i) in bands" :key="'h' + i"
         class="eq__handle"
-        :style="{ left: xPctFor(b.freq) + '%', background: handleColor(i) }"
-      >{{ b.id }}</span>
+        :class="{ 'eq__handle--out': b.gain === 0 }"
+        :style="{
+          left: xPctFor(b.freq) + '%',
+          top: (yFor(Math.max(-GRAPH_DB, Math.min(GRAPH_DB, b.gain))) / 120 * 100) + '%',
+          background: handleColor(i),
+        }"
+      >{{ EQ_BAND_NAMES[i] }}</span>
       <!-- The filters get markers too, so a corner in the curve can be traced
            to the knob that put it there rather than looking like an EQ band
            nobody moved. Only shown when the filter is in circuit. -->
@@ -54,42 +61,53 @@
       >{{ t('mixer.lpf') }}</span>
     </div>
 
-    <div class="eq__grid-controls eq__grid-controls--pending">
-      <span class="eq__pending">{{ t('mixer.notImplemented') }}</span>
-      <!-- Header row: the bands. -->
+    <div class="eq__grid-controls">
+      <!-- Header row: the bands. A band's name lights while it is in circuit,
+           which for a bell means its gain is off zero — the same rule the
+           engine uses to decide whether to run the section at all. -->
       <span class="eq__rowlabel"></span>
-      <span v-for="b in bands" :key="'n' + b.id" class="eq__bandname">{{ b.id }}</span>
+      <span
+        v-for="(b, i) in bands" :key="'n' + i"
+        class="eq__bandname"
+        :class="{ 'eq__bandname--in': b.gain !== 0 }"
+      >{{ EQ_BAND_NAMES[i] }}</span>
 
       <span class="eq__rowlabel">{{ t('mixer.freq') }}</span>
       <KnobField
-        v-for="b in bands" :key="'f' + b.id"
-        :value="b.freq" :min="20" :max="20000" :origin="1000"
-        :decimals="0" unit="Hz" :size="30" :show-label="false" disabled
+        v-for="(b, i) in bands" :key="'f' + i"
+        :value="b.freq" :min="20" :max="20000" :origin="bandDefaults[i]!.freq"
+        :decimals="0" unit="Hz" :size="30" :show-label="false"
+        :disabled="!bus"
+        @input="(v: number) => onBand(i, 'freq', v)"
       />
 
       <span class="eq__rowlabel">{{ t('mixer.gain') }}</span>
       <KnobField
-        v-for="b in bands" :key="'g' + b.id"
+        v-for="(b, i) in bands" :key="'g' + i"
         :value="b.gain" :min="-18" :max="18" :origin="0"
-        :decimals="1" unit="dB" :size="30" :show-label="false" disabled
+        :decimals="1" unit="dB" :size="30" :show-label="false"
+        :disabled="!bus"
+        @input="(v: number) => onBand(i, 'gain', v)"
       />
 
       <span class="eq__rowlabel">{{ t('mixer.q') }}</span>
       <KnobField
-        v-for="b in bands" :key="'q' + b.id"
-        :value="b.q" :min="0.1" :max="10" :origin="0.7"
-        :decimals="2" :size="30" :show-label="false" disabled
+        v-for="(b, i) in bands" :key="'q' + i"
+        :value="b.q" :min="0.1" :max="10" :origin="bandDefaults[i]!.q"
+        :decimals="2" :size="30" :show-label="false"
+        :disabled="!bus"
+        @input="(v: number) => onBand(i, 'q', v)"
       />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import KnobField from './KnobField.vue';
 import { METER_COLORS } from '~/composables/useOutputTarget';
-import type { Bus } from '~/types/project';
-import { HPF_PARKED_HZ, LPF_PARKED_HZ } from '~/types/project';
+import type { Bus, BusDsp, BusEqBand } from '~/types/project';
+import { EQ_BAND_NAMES, HPF_PARKED_HZ, LPF_PARKED_HZ } from '~/types/project';
 import type { BiquadCoeffs } from '~/utils/filterResponse';
 import {
   biquadHighpass, biquadLowpass, biquadPeaking, combinedMagnitudeDb,
@@ -99,17 +117,62 @@ import {
 // before the first bus fetch lands.
 const props = defineProps<{ bus?: Bus | null }>();
 
-const { t } = useLocalization();
+const emit = defineEmits<{
+  (e: 'patch', id: string, patch: Partial<Bus>): void;
+  /** In-flight band values, so the curve tracks the knob. See the fader. */
+  (e: 'dsp-live', dsp: Partial<BusDsp>): void;
+}>();
 
-// Default band layout. These are the values the panel displays until the DSP
-// stage gives it real ones — chosen as a conventional four-band starting point
-// rather than invented.
-const bands = [
-  { id: 'LF',  freq: 100,   gain: 0, q: 0.7 },
-  { id: 'LMF', freq: 500,   gain: 0, q: 1.0 },
-  { id: 'HMF', freq: 2500,  gain: 0, q: 1.0 },
-  { id: 'HF',  freq: 10000, gain: 0, q: 0.7 },
+const { t } = useLocalization();
+const server = useLiveplayServer();
+
+// The conventional four-band starting layout. Doubles as each knob's origin,
+// so a double-click puts a band back where it started rather than at zero
+// Hertz — and it must match the server's defaults or a fresh bus would appear
+// to have been moved already.
+const bandDefaults: BusEqBand[] = [
+  { freq: 100,   gain: 0, q: 0.7 },
+  { freq: 500,   gain: 0, q: 1.0 },
+  { freq: 2500,  gain: 0, q: 1.0 },
+  { freq: 10000, gain: 0, q: 0.7 },
 ];
+
+// The bands as displayed: the bus's, held locally while a knob is moving.
+//
+// Same live-then-persist shape as the filters and the fader. The strip gets
+// new coefficients on every drag event over a call that writes no document,
+// and the bus is written once the gesture settles. Binding straight to the bus
+// would PATCH and refetch per event, and the knob would fight the round trip.
+const localBands = ref<BusEqBand[] | null>(null);
+let   bandHold   = false;
+let   bandSettle: ReturnType<typeof setTimeout> | null = null;
+
+const bands = computed<BusEqBand[]>(() =>
+  localBands.value
+  ?? props.bus?.dsp?.eq
+  ?? bandDefaults);
+
+watch(() => props.bus?.dsp?.eq, () => { if (!bandHold) localBands.value = null; },
+      { deep: true });
+watch(() => props.bus?.id, () => { localBands.value = null; });
+
+onBeforeUnmount(() => { if (bandSettle) clearTimeout(bandSettle); });
+
+function onBand(index: number, key: keyof BusEqBand, value: number) {
+  if (!props.bus) return;
+  const next = bands.value.map((b, i) => (i === index ? { ...b, [key]: value } : { ...b }));
+  localBands.value = next;
+  bandHold = true;
+  // The curve is told first, so it tracks the knob rather than the round trip.
+  emit('dsp-live', { eq: next });
+  void server.setBusDsp(props.bus.id, { eq: next }).catch(() => {});
+  if (bandSettle) clearTimeout(bandSettle);
+  bandSettle = setTimeout(() => {
+    bandSettle = null;
+    bandHold   = false;
+    emit('patch', props.bus!.id, { dsp: { eq: next } } as Partial<Bus>);
+  }, 250);
+}
 
 const GRAPH_DB = 18;               // curve spans +/- this
 const gridDb = [12, 6, -6, -12];
@@ -145,7 +208,8 @@ const sections = computed<BiquadCoeffs[]>(() => {
   if (lpf && lpf.freq < LPF_PARKED_HZ) {
     out.push(biquadLowpass(lpf.freq, SAMPLE_RATE, lpf.q || 0.7071));
   }
-  for (const b of bands) {
+  for (const b of bands.value) {
+    // 0 dB is an identity whatever the Q, so it contributes nothing to draw.
     if (b.gain !== 0) out.push(biquadPeaking(b.freq, SAMPLE_RATE, b.gain, b.q));
   }
   return out;
@@ -185,22 +249,10 @@ const handleColor = (i: number) =>
 .eq { min-height: 0; }
 .eq > *:not(.eq__graph) { flex: 0 0 auto; }
 
-/* The band controls are still shells; the curve above them is not. The dashed
-   frame is on the controls alone so the panel does not disown a display that
-   is telling the truth. */
-.eq__grid-controls--pending {
-  position: relative;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--border-radius-sm);
-  padding-top: 10px;
-}
-.eq__pending {
-  position: absolute;
-  top: 1px;
-  right: 4px;
-  font-size: 8px;
-  color: var(--color-text-disabled);
-}
+/* A band out of circuit still shows its handle, so you can find it to bring it
+   in, but it recedes rather than competing with the bands doing something. */
+.eq__handle--out { opacity: 0.4; }
+.eq__bandname--in { color: var(--color-accent); }
 /* Filter markers read as fixtures rather than as a fifth and sixth band. */
 .eq__handle--filter {
   background: var(--color-text-disabled);

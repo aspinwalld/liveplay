@@ -1609,12 +1609,7 @@ void ControlServer::install_routes() {
                         {"gainDb",   b.def.gain_db},
                         {"mute",     b.def.muted},
                         {"pan",      b.def.pan},
-                        {"dsp",      json{
-                            {"hpf", json{{"freq", b.def.dsp.hpf.freq_hz},
-                                         {"q",    b.def.dsp.hpf.q}}},
-                            {"lpf", json{{"freq", b.def.dsp.lpf.freq_hz},
-                                         {"q",    b.def.dsp.lpf.q}}},
-                        }},
+                        {"dsp",      core::bus_dsp_to_json(b.def.dsp)},
                         // Live monitoring state, not part of the document —
                         // it comes from the strip, and a reload clears it.
                         {"pfl",      b.pfl},
