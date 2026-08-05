@@ -185,9 +185,46 @@ const uuid = 'item-filters-0001';
   ok('a wide +12 dB band lifts the sweep', boostDb > flat + 4,
      `${flat.toFixed(1)} -> ${boostDb.toFixed(1)} dB RMS`);
 
-  // Back to flat, exactly.
+  // ---- Section bypass ----
+  // The whole point of a bypass over zeroing the controls: it takes the
+  // section out AND gives it back untouched. Both halves are asserted, with
+  // the boost still dialled in throughout.
+  //
+  // The boost is PATCHed here rather than reused from the live call above.
+  // The /dsp endpoint is the in-gesture path and deliberately does not write
+  // the document, so the stored bands were still the defaults - which is
+  // exactly what "switching it back in" would have restored.
+  await rest(`/api/buses/${bus}`, {
+    method: 'PATCH', body: JSON.stringify({ dsp: { eq: boost } }) });
+  await sleep(SETTLE_MS);
+  await measure(m, 2000);
+  const boostedStored = m.rms(b.mixerId);
+  ok('the persisted boost is in circuit', Math.abs(boostedStored - boostDb) < 0.3,
+     `${boostDb.toFixed(1)} -> ${boostedStored.toFixed(1)} dB RMS`);
+
   await rest(`/api/buses/${bus}/dsp`, {
-    method: 'POST', body: JSON.stringify({ eq: flatBands }) });
+    method: 'POST', body: JSON.stringify({ eqEnabled: false }) });
+  await sleep(SETTLE_MS);
+  await measure(m, 2000);
+  ok('bypass takes the EQ out', Math.abs(m.rms(b.mixerId) - flat) < 0.3,
+     `boosted ${boostedStored.toFixed(1)} -> bypassed ${m.rms(b.mixerId).toFixed(1)} dB RMS`);
+
+  const bypassed = (await rest('/api/buses')).body.find(x => x.id === bus);
+  ok('bypass keeps the band settings',
+     bypassed.dsp.eq[1].gain === 12 && bypassed.dsp.eq[1].freq === 700,
+     JSON.stringify(bypassed.dsp.eq[1]));
+
+  await rest(`/api/buses/${bus}/dsp`, {
+    method: 'POST', body: JSON.stringify({ eqEnabled: true }) });
+  await sleep(SETTLE_MS);
+  await measure(m, 2000);
+  ok('switching it back in restores the boost',
+     Math.abs(m.rms(b.mixerId) - boostedStored) < 0.3,
+     `${boostedStored.toFixed(1)} -> ${m.rms(b.mixerId).toFixed(1)} dB RMS`);
+
+  // Back to flat, exactly.
+  await rest(`/api/buses/${bus}`, {
+    method: 'PATCH', body: JSON.stringify({ dsp: { eq: flatBands } }) });
   await sleep(SETTLE_MS);
   await measure(m, 2000);
   ok('flattening the bands restores it', Math.abs(m.rms(b.mixerId) - flat) < 0.3,

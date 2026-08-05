@@ -120,6 +120,13 @@ struct BusEqBand {
 inline constexpr std::size_t kBusEqBands = 4;
 
 struct BusDsp {
+    // Section bypass. Separate from a band being flat: bypass takes the whole
+    // section out in one press and, crucially, PUTS IT BACK exactly as it was.
+    // Zeroing four gains to compare against flat loses the settings you were
+    // comparing, which is the entire reason a desk has an in/out button per
+    // section rather than expecting you to undo your way back.
+    bool      eq_enabled  = true;
+    bool      dyn_enabled = true;
     BusFilter hpf{20.0f};       // parked at the bottom: out of circuit
     BusFilter lpf{20000.0f};    // parked at the top: out of circuit
     // Conventional four-band starting layout, matching what the surface shows.

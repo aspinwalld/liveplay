@@ -3616,6 +3616,8 @@ namespace {
 // Declared in the header: the control server serialises buses too.
 void merge_bus_dsp(const json& src, BusDsp& out) {
     if (!src.is_object()) return;
+    out.eq_enabled  = src.value("eqEnabled",  out.eq_enabled);
+    out.dyn_enabled = src.value("dynEnabled", out.dyn_enabled);
     const auto filter = [](const json& f, BusFilter& o) {
         if (!f.is_object()) return;
         o.freq_hz = f.value("freq", o.freq_hz);
@@ -3641,6 +3643,8 @@ json bus_dsp_to_json(const BusDsp& d) {
         eq.push_back(json{{"freq", b.freq_hz}, {"gain", b.gain_db}, {"q", b.q}});
     }
     return json{
+        {"eqEnabled",  d.eq_enabled},
+        {"dynEnabled", d.dyn_enabled},
         {"hpf", json{{"freq", d.hpf.freq_hz}, {"q", d.hpf.q}}},
         {"lpf", json{{"freq", d.lpf.freq_hz}, {"q", d.lpf.q}}},
         {"eq",  std::move(eq)},
@@ -3962,13 +3966,16 @@ audio::StripDspParams ProjectState::dsp_params_for(const BusDef& bus) {
     // A band at 0 dB is an identity whatever its Q, so it is left out of
     // circuit rather than run to achieve nothing. ChannelDsp checks the gain
     // again on its side; this keeps the two honest about the same rule.
+    //
+    // A bypassed section takes every band out while leaving the parameters
+    // untouched, so switching it back in restores exactly what was there.
     for (std::size_t i = 0; i < kBusEqBands && i < audio::kEqBands; ++i) {
         const auto& src = bus.dsp.eq[i];
         auto&       dst = p.eq[i];
         dst.freq_hz = src.freq_hz;
         dst.gain_db = src.gain_db;
         dst.q       = src.q;
-        dst.enabled = src.gain_db != 0.0f;
+        dst.enabled = bus.dsp.eq_enabled && src.gain_db != 0.0f;
     }
     return p;
 }

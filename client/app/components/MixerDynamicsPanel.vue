@@ -15,6 +15,15 @@
     <h4 class="det__h">
       {{ t('mixer.tabDynamics') }}
       <span class="det__pending">{{ t('mixer.notImplemented') }}</span>
+      <!-- The state is real and persists; the processing it will bypass does
+           not exist yet, so the button is held disabled rather than offered as
+           something that works. It goes live with the gate and compressor. -->
+      <button
+        class="det__byp"
+        :class="{ 'det__byp--on': !dynIn }"
+        disabled
+        :title="t('mixer.bypassPending')"
+      >{{ t('mixer.bypass') }}</button>
     </h4>
 
     <div class="dyn__body">
@@ -71,9 +80,19 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import KnobField from './KnobField.vue';
+import type { Bus } from '~/types/project';
+
+// Optional so the panel still renders before the first bus fetch lands.
+const props = defineProps<{ bus?: Bus | null }>();
 
 const { t } = useLocalization();
+
+// Whether the section is in circuit. Read-only for now: the state persists on
+// the bus and the button is disabled, because there is no dynamics processing
+// for it to take out yet.
+const dynIn = computed(() => props.bus?.dsp?.dynEnabled ?? true);
 
 // Ranges are the conventional ones for each control, so the knobs already
 // travel correctly when the processors arrive and only the values need wiring.
@@ -120,7 +139,7 @@ const compParams = [
   flex: 0 0 auto;
   align-self: center;
   aspect-ratio: 1;
-  height: clamp(100px, 15vh, 170px);
+  height: clamp(120px, 22vh, 170px);
   max-height: 100%;
   background: var(--color-background);
   border-radius: var(--border-radius-sm);

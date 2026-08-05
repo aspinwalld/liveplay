@@ -79,7 +79,7 @@
           </div>
         </section>
 
-        <MixerDynamicsPanel class="det__dyn" />
+        <MixerDynamicsPanel class="det__dyn" :bus="curveBus" />
 
         <!-- What is connected, in signal order: what arrives at this bus, then
              where it goes. Sends takes the height it needs at the bottom and
@@ -368,7 +368,44 @@ function itemName(uuid: string): string {
    here can be mistaken for a control that does something. */
 .det__panel--pending { border-style: dashed; }
 
-.det__h {
+/* The `det__` classes are a vocabulary shared with the child panels, so they
+   have to be written to cross the scope boundary.
+
+   Scoped CSS compiles `.det__h` to `.det__h[data-v-thisfile]`, and Vue only
+   stamps this file's id onto a child component's ROOT element. `.det__panel`
+   worked by luck, because it happens to be each panel's root; `.det__h` never
+   applied to the headers inside MixerEqPanel or MixerDynamicsPanel at all,
+   which is why they have been rendering as bare h4s. Pairing each selector
+   with its :deep() form covers this component's own elements and the
+   children's alike. */
+.det__byp,
+:deep(.det__byp) {
+  margin-left: auto;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  cursor: pointer;
+}
+.det__byp:hover:not(:disabled),
+:deep(.det__byp:hover:not(:disabled)) { color: var(--color-text-primary); }
+.det__byp:disabled,
+:deep(.det__byp:disabled) { opacity: 0.4; cursor: not-allowed; }
+/* Lit means OUT of circuit. A bypass lamp marks the abnormal state, which is
+   the one worth spotting from a distance. */
+.det__byp--on,
+:deep(.det__byp--on) {
+  color: #fff;
+  background: var(--color-warning, #b28600);
+  border-color: var(--color-warning, #b28600);
+}
+
+.det__h,
+:deep(.det__h) {
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);

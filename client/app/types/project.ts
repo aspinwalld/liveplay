@@ -187,6 +187,14 @@ export interface BusEqBand {
 
 /** The strip's tone controls. Dynamics join this as they land. */
 export interface BusDsp {
+  /**
+   * Section bypass. Distinct from every band being flat: it takes the whole
+   * section out in one press and puts it back exactly as it was, which is why
+   * a desk has an in/out button per section rather than expecting you to
+   * zero the controls and remember what they were.
+   */
+  eqEnabled: boolean;
+  dynEnabled: boolean;
   hpf: BusFilter;
   lpf: BusFilter;
   eq: BusEqBand[];

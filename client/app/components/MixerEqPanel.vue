@@ -16,8 +16,20 @@
     them would be drawing a lie. The four band controls are still shells, so
     the pending badge sits on them rather than on the whole panel.
   -->
-  <section class="eq det__panel">
-    <h4 class="det__h">{{ t('mixer.tabEq') }}</h4>
+  <section class="eq det__panel" :class="{ 'eq--bypassed': !eqIn }">
+    <h4 class="det__h">
+      {{ t('mixer.tabEq') }}
+      <!-- Lights when the section is OUT, as a bypass button does on a desk:
+           the lamp means "this is not in circuit", which is the state worth
+           spotting from across a room. -->
+      <button
+        class="det__byp"
+        :class="{ 'det__byp--on': !eqIn }"
+        :disabled="!bus"
+        :title="t('mixer.bypassHint')"
+        @click="toggleEq"
+      >{{ t('mixer.bypass') }}</button>
+    </h4>
 
     <!-- Response curve. Flat, with a handle per band at its frequency —
          the shape the real curve will take, so the panel does not change
@@ -166,6 +178,24 @@ watch(() => props.bus?.id, () => { localBands.value = null; });
 
 onBeforeUnmount(() => { if (bandSettle) clearTimeout(bandSettle); });
 
+// Whether the section is in circuit. Held locally through the round trip for
+// the same reason the bands are, so the button responds to the press.
+const localEqIn = ref<boolean | null>(null);
+const eqIn = computed(() => localEqIn.value ?? props.bus?.dsp?.eqEnabled ?? true);
+watch(() => props.bus?.dsp?.eqEnabled, () => { localEqIn.value = null; });
+watch(() => props.bus?.id, () => { localEqIn.value = null; });
+
+function toggleEq() {
+  if (!props.bus) return;
+  const next = !eqIn.value;
+  localEqIn.value = next;
+  emit('dsp-live', { eqEnabled: next });
+  void server.setBusDsp(props.bus.id, { eqEnabled: next }).catch(() => {});
+  // Bypass is a discrete press rather than a gesture, so it persists straight
+  // away instead of waiting for a settle timer that will never be re-armed.
+  emit('patch', props.bus.id, { dsp: { eqEnabled: next } } as Partial<Bus>);
+}
+
 function onBand(index: number, key: keyof BusEqBand, value: number) {
   if (!props.bus) return;
   const next = bands.value.map((b, i) => (i === index ? { ...b, [key]: value } : { ...b }));
@@ -216,9 +246,15 @@ const sections = computed<BiquadCoeffs[]>(() => {
   if (lpf && lpf.freq < LPF_PARKED_HZ) {
     out.push(biquadLowpass(lpf.freq, SAMPLE_RATE, lpf.q || 0.7071));
   }
-  for (const b of bands.value) {
-    // 0 dB is an identity whatever the Q, so it contributes nothing to draw.
-    if (b.gain !== 0) out.push(biquadPeaking(b.freq, SAMPLE_RATE, b.gain, b.q));
+  // A bypassed section contributes nothing to the curve. The filters still do:
+  // they are separate controls on the fader column and this button does not
+  // reach them. Without this the curve would keep drawing a shape the audio
+  // no longer has, which is worse than not drawing it at all.
+  if (eqIn.value) {
+    for (const b of bands.value) {
+      // 0 dB is an identity whatever the Q, so it contributes nothing to draw.
+      if (b.gain !== 0) out.push(biquadPeaking(b.freq, SAMPLE_RATE, b.gain, b.q));
+    }
   }
   return out;
 });
@@ -261,6 +297,12 @@ const handleColor = (i: number) =>
    in, but it recedes rather than competing with the bands doing something. */
 .eq__handle--out { opacity: 0.4; }
 .eq__bandname--in { color: var(--color-accent); }
+
+/* Bypassed: the controls dim so the state is unmistakable at a glance, but
+   they stay readable and adjustable. Setting an EQ while listening past it and
+   then switching it in is a normal way to work. */
+.eq--bypassed .eq__grid-controls,
+.eq--bypassed .eq__graph { opacity: 0.45; }
 /* Filter markers read as fixtures rather than as a fifth and sixth band. */
 .eq__handle--filter {
   background: var(--color-text-disabled);
