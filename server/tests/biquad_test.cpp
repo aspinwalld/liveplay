@@ -13,6 +13,7 @@
 // the coefficient arithmetic against itself would sail straight past.
 // ============================================================================
 #include "liveplay/audio/biquad.hpp"
+#include "liveplay/audio/channel_dsp.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -37,20 +38,32 @@ void check_true(const char* name, bool ok) {
 
 constexpr double kFs = 48000.0;
 
-// Drive a steady sine through the section and return its output level in dB.
-// Half the run is discarded so the reading is steady state, not the section's
-// start-up transient.
+// Drive a steady sine through the section and return its gain in dB, measured
+// as the ratio of output RMS to input RMS. Half the run is discarded so the
+// reading is steady state, not the section's start-up transient.
+//
+// RMS rather than peak, deliberately. Peak-detecting a sampled sine only finds
+// the true peak if a sample happens to land on it: at 8 kHz on a 48 kHz rate
+// there are six samples per cycle and the highest lands at 0.866, which is
+// 1.25 dB low. Filters shift phase, so the error differs between input and
+// output and does not cancel — it produced a 1.2 dB "failure" against a filter
+// that was in fact exact. RMS over many cycles does not care where the samples
+// fall.
 double measured_response_db(const BiquadCoeffs& c, double freq_hz) {
     BiquadState st;
     const int settle = 24000;
     const int measure = 24000;
-    double peak = 0.0;
+    double sum_in = 0.0, sum_out = 0.0;
     for (int n = 0; n < settle + measure; ++n) {
         const float x = static_cast<float>(std::sin(2.0 * kPi * freq_hz * n / kFs));
         const float y = st.process(c, x);
-        if (n >= settle) peak = std::max(peak, std::fabs(static_cast<double>(y)));
+        if (n >= settle) {
+            sum_in  += static_cast<double>(x) * x;
+            sum_out += static_cast<double>(y) * y;
+        }
     }
-    return peak <= 0.0 ? -200.0 : 20.0 * std::log10(peak);
+    if (sum_in <= 0.0 || sum_out <= 0.0) return -200.0;
+    return 10.0 * std::log10(sum_out / sum_in);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +241,136 @@ void test_stability() {
                 g_failures == 0 ? "PASS" : "FAIL", checked);
 }
 
+// ---------------------------------------------------------------------------
+// The strip's chain: the container the render loop actually calls.
+// ---------------------------------------------------------------------------
+// Run `blocks` blocks of a sine through one lane and report the chain's gain,
+// as an RMS ratio for the same reason measured_response_db uses one.
+double chain_response_db(ChannelDsp& dsp, ChannelIndex lane,
+                         double freq_hz, int blocks = 200) {
+    constexpr std::size_t kBlock = 256;
+    std::vector<Sample> buf(kBlock), in(kBlock);
+    double sum_in = 0.0, sum_out = 0.0;
+    int n = 0;
+    for (int b = 0; b < blocks; ++b) {
+        for (std::size_t s = 0; s < kBlock; ++s, ++n) {
+            in[s]  = static_cast<float>(std::sin(2.0 * kPi * freq_hz * n / kFs));
+            buf[s] = in[s];
+        }
+        dsp.advance_coeffs();
+        dsp.process_block(lane, buf.data(), kBlock);
+        // Ignore the first half: coefficients ramp, and the sections settle.
+        if (b > blocks / 2) {
+            for (std::size_t s = 0; s < kBlock; ++s) {
+                sum_in  += static_cast<double>(in[s])  * in[s];
+                sum_out += static_cast<double>(buf[s]) * buf[s];
+            }
+        }
+    }
+    if (sum_in <= 0.0 || sum_out <= 0.0) return -200.0;
+    return 10.0 * std::log10(sum_out / sum_in);
+}
+
+void test_chain_transparency() {
+    // Every block flat means bit-transparent, not nearly. A strip whose tone
+    // controls are untouched must not colour the desk, and four EQ bands in
+    // circuit at 0 dB is the default state of every bus on it.
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    check_true("chain: a flat chain reports itself inactive", !dsp.active());
+
+    constexpr std::size_t kBlock = 256;
+    std::vector<Sample> buf(kBlock), orig(kBlock);
+    double worst = 0.0;
+    for (int b = 0; b < 50; ++b) {
+        for (std::size_t s = 0; s < kBlock; ++s) {
+            orig[s] = static_cast<float>(0.7 * std::sin(2.0 * kPi * 440.0 * (b * kBlock + s) / kFs));
+            buf[s]  = orig[s];
+        }
+        dsp.advance_coeffs();
+        dsp.process_block(0, buf.data(), kBlock);
+        for (std::size_t s = 0; s < kBlock; ++s)
+            worst = std::max(worst, std::fabs(static_cast<double>(buf[s] - orig[s])));
+    }
+    check_true("chain: flat chain is bit-transparent", worst == 0.0);
+}
+
+void test_chain_hpf() {
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    StripDspParams p;
+    p.hpf.enabled = true;
+    p.hpf.freq_hz = 200.0f;
+    dsp.set_params(p);
+    check_true("chain: enabling the HPF marks the strip active", dsp.active());
+
+    check_near("chain: HPF passes 2 kHz",      chain_response_db(dsp, 0, 2000.0), 0.0, 0.2);
+    check_near("chain: HPF is -3 dB at 200 Hz", chain_response_db(dsp, 0, 200.0), -3.01, 0.2);
+    check_true("chain: HPF cuts 50 Hz hard",    chain_response_db(dsp, 0, 50.0) < -20.0);
+}
+
+void test_chain_lane_independence() {
+    // The notes call this out and they are right: one filter's memory shared
+    // across lanes would bleed one side of the image into the other.
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    StripDspParams p;
+    p.hpf.enabled = true;
+    p.hpf.freq_hz = 500.0f;
+    dsp.set_params(p);
+
+    constexpr std::size_t kBlock = 256;
+    std::vector<Sample> left(kBlock), right(kBlock);
+    double right_peak = 0.0;
+    for (int b = 0; b < 100; ++b) {
+        for (std::size_t s = 0; s < kBlock; ++s) {
+            left[s]  = static_cast<float>(std::sin(2.0 * kPi * 3000.0 * (b * kBlock + s) / kFs));
+            right[s] = 0.0f;                      // the other side is silent
+        }
+        dsp.advance_coeffs();
+        dsp.process_block(0, left.data(),  kBlock);
+        dsp.process_block(1, right.data(), kBlock);
+        for (float v : right) right_peak = std::max(right_peak, std::fabs((double)v));
+    }
+    check_true("chain: a silent lane stays silent beside a loud one", right_peak == 0.0);
+}
+
+void test_chain_param_handover() {
+    // Parameters cross from the control thread to the render thread through a
+    // double-buffered slot. If that handover did not work the filter would
+    // simply never change, which is a silent failure — the knob moves and the
+    // audio does not.
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    const double before = chain_response_db(dsp, 0, 60.0);
+    check_near("chain: 60 Hz passes with no filter", before, 0.0, 0.2);
+
+    StripDspParams p;
+    p.hpf.enabled = true;
+    p.hpf.freq_hz = 400.0f;
+    dsp.set_params(p);
+    const double after = chain_response_db(dsp, 0, 60.0);
+    check_true("chain: publishing new params changes the audio", after < before - 20.0);
+
+    // And back off again — the handover must not be one-way.
+    dsp.set_params(StripDspParams{});
+    check_near("chain: disabling restores it", chain_response_db(dsp, 0, 60.0), 0.0, 0.2);
+}
+
+void test_chain_eq_bands_cascade() {
+    // Four bands in series, two of them doing something at once.
+    ChannelDsp dsp;
+    dsp.configure(48000);
+    StripDspParams p;
+    p.eq[0] = {true, 100.0f,  6.0f, 1.0f};
+    p.eq[3] = {true, 8000.0f, -6.0f, 1.0f};
+    dsp.set_params(p);
+    check_near("chain: EQ band 1 boosts its centre", chain_response_db(dsp, 0, 100.0),  6.0, 0.3);
+    check_near("chain: EQ band 4 cuts its centre",   chain_response_db(dsp, 0, 8000.0), -6.0, 0.3);
+    check_near("chain: between the bands is untouched",
+               chain_response_db(dsp, 0, 1000.0), 0.0, 0.5);
+}
+
 } // namespace
 
 int main() {
@@ -240,6 +383,12 @@ int main() {
     test_denormal_flush();
     test_nyquist_clamp();
     test_stability();
+    std::printf("\n== channel strip chain ==\n");
+    test_chain_transparency();
+    test_chain_hpf();
+    test_chain_lane_independence();
+    test_chain_param_handover();
+    test_chain_eq_bands_cascade();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES",
                 g_failures, g_failures == 1 ? "" : "s");

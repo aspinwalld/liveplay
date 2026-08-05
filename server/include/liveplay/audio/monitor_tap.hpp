@@ -74,11 +74,18 @@ inline void mix_monitor_taps(
     }
 }
 
-// The taps a strip contributes when PFL is up. Stereo goes lane-for-lane at
-// unity; mono lives on lane 0 alone and would arrive hard left if tapped the
-// same way, so it is centred by the same -3 dB the pan law uses at centre.
-// PFL is pre-pan, as on a desk: where a bus sits in the house image does not
-// move where it sits in the operator's headphones.
+// The taps a strip contributes when PFL is up.
+//
+// Stereo goes lane-for-lane at unity. Mono lives on lane 0 alone and would
+// arrive hard left if tapped the same way, so it is placed across both monitor
+// lanes by the pan law — the tap carries the pan itself.
+//
+// That is what makes PFL post-pan. Pan is not a strip operation here: it lives
+// in the strip's send to the master (§2.5.3), which sits downstream of this
+// tap, so a tap that ignored it would put every mono bus dead centre in the
+// phones no matter where it sat in the house. At pan centre the law gives
+// -3.01 dB, which is the downmix constant to within a hundredth of a dB, so a
+// centred bus reads exactly as it did before.
 inline void append_monitor_taps(std::vector<MonitorTap>& out,
                                 std::shared_ptr<MixerChannel> strip) {
     if (!strip) return;
@@ -86,9 +93,9 @@ inline void append_monitor_taps(std::vector<MonitorTap>& out,
         out.push_back({strip, 0, 0, 1.0f});
         out.push_back({strip, 1, 1, 1.0f});
     } else {
-        const float g = db_to_linear_precise(kDefaultDownmixDb);
-        out.push_back({strip, 0, 0, g});
-        out.push_back({strip, 0, 1, g});
+        const auto g = pan_gains_db(strip->pan());
+        out.push_back({strip, 0, 0, db_to_linear_precise(g.left)});
+        out.push_back({strip, 0, 1, db_to_linear_precise(g.right)});
     }
 }
 

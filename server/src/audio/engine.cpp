@@ -814,6 +814,27 @@ void AudioEngine::set_mixer_width(const MixerChannelId& id, ChannelCount width) 
     if (it->second->is_pfl()) rebuild_topology_locked();
 }
 
+void AudioEngine::set_mixer_pan(const MixerChannelId& id, float pan) {
+    std::lock_guard lock{mutex_};
+    auto it = mixers_.find(id.value);
+    if (it == mixers_.end()) return;
+    if (it->second->pan() == pan) return;
+    it->second->set_pan(pan);
+    // The monitor tap carries the pan, so a tapped strip needs new taps. A
+    // strip nobody is listening to costs nothing here — which matters, since
+    // this is called for every event of a pan drag.
+    if (it->second->is_pfl()) rebuild_topology_locked();
+}
+
+void AudioEngine::set_mixer_dsp(const MixerChannelId& id, const StripDspParams& params) {
+    // The strip publishes into its own slot, so this needs the registry lock
+    // only long enough to find the strip — not a topology rebuild.
+    std::lock_guard lock{mutex_};
+    auto it = mixers_.find(id.value);
+    if (it == mixers_.end()) return;
+    it->second->dsp().set_params(params);
+}
+
 void AudioEngine::remove_mixer_channel(const MixerChannelId& id) {
     std::lock_guard lock{mutex_};
     mixers_.erase(id.value);
@@ -1209,12 +1230,28 @@ void AudioEngine::render_one_block(const Topology& topo) {
         }
     }
 
+    // ---- Tier-2 strip processing: the tone chain ----
+    // HPF, LPF and EQ, in place on each bus's accumulators, before the tap and
+    // before the fader. This is the console order — you are filtering the
+    // channel, not the send — and it is what makes PFL post-processing.
+    //
+    // It runs regardless of mute, because PFL is pre-mute: a muted channel
+    // still has to be checkable in the phones. Strips whose controls are all
+    // flat report inactive and cost nothing, which is most of them.
+    for (std::size_t i = 0; i < active_mixers.size(); ++i) {
+        auto& dsp = active_mixers[i]->dsp();
+        if (!dsp.active()) continue;
+        dsp.advance_coeffs();            // once per block, so both lanes match
+        for (ChannelIndex lane = 0; lane < kMixerLanes; ++lane) {
+            dsp.process_block(lane, mixer_accumulators_[i * kMixerLanes + lane].data(), block);
+        }
+    }
+
     // ---- PFL taps into the Monitor strip ----
-    // Placed here, between the item pass and the strip pass, which is what
-    // makes the tap pre-fader and pre-mute: the accumulators still hold the
-    // raw sum of what feeds each bus. Monitor is a strip like any other, so
-    // the pass below then applies its own fader and mute to the result —
-    // that fader is the headphone level.
+    // Placed here, between the tone chain and the fader, which is what makes
+    // the tap post-processing and pre-fader. Monitor is a strip like any
+    // other, so the pass below then applies its own fader and mute to the
+    // result — that fader is the headphone level.
     //
     // Nothing is copied. The tap adds straight into the monitor's
     // accumulator, which is the buffer copy §2.4 costed, minus the copy.

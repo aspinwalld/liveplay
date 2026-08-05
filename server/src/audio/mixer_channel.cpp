@@ -16,6 +16,11 @@ void MixerChannel::configure(SampleRate sample_rate, FrameCount render_block) no
     sample_rate_  = sample_rate;
     render_block_ = render_block;
     for (auto& m : meters_) m.configure(sample_rate);
+    dsp_.configure(sample_rate);
+}
+
+void MixerChannel::set_pan(float pan) noexcept {
+    pan_.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
 }
 
 void MixerChannel::set_gain_db(float db) noexcept {

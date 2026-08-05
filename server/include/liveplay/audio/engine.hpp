@@ -285,6 +285,18 @@ public:
     // monitor: a mono strip is centred rather than tapped lane-for-lane.
     void set_mixer_width(const MixerChannelId& id, ChannelCount width);
 
+    // Where a mono strip sits in its destination image. The strip's send to
+    // the master carries this too; the engine needs its own copy because the
+    // PFL tap is taken upstream of that send and has to place the signal
+    // itself to stay post-pan.
+    void set_mixer_pan(const MixerChannelId& id, float pan);
+
+    // Publish a new tone chain (HPF / LPF / EQ) for a strip. Coefficients are
+    // computed here, on the control thread, and handed to the render thread
+    // through the strip's own double-buffered slot — no topology rebuild, so
+    // dragging an EQ knob does not re-walk every route on the desk.
+    void set_mixer_dsp(const MixerChannelId& id, const StripDspParams& params);
+
     // ---- Routing matrix --------------------------------------------------
     // `lane` selects which mixer strip lane the source channel feeds
     // (0 = L, 1 = R). kAllMixerLanes fans the channel across every lane —

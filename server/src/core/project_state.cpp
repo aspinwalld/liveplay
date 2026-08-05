@@ -3930,6 +3930,11 @@ void ProjectState::apply_bus_pan(const BusDef& bus, const BusRouting& routing) {
     // pan — balance is deferred — and a mono destination has nowhere to pan to.
     if (routing.mixer.empty() || bus.width >= 2) return;
 
+    // The strip needs its own copy: the PFL tap is taken upstream of the sends
+    // below, so it places the signal itself to stay post-pan. Without this a
+    // panned mono bus would sit dead centre in the phones.
+    engine_.set_mixer_pan(routing.mixer, bus.pan);
+
     const auto g = audio::pan_gains_db(bus.pan);
 
     if (bus.output_kind == BusOutputKind::Master) {

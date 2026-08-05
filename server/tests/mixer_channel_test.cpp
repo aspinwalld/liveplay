@@ -273,13 +273,62 @@ void test_monitor_tap_mix() {
         std::vector<MonitorTap> taps;
         append_monitor_taps(taps, bench.a);
         mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
-        const double expect = std::pow(10.0, kDefaultDownmixDb / 20.0);
-        check_near("tap: mono arrives on monitor L at the centre gain",
-                   bench.mon(0), expect, 1e-4);
-        check_near("tap: mono arrives on monitor R at the centre gain",
-                   bench.mon(1), expect, 1e-4);
+        // The pan law's own centre, not the downmix constant it approximates.
+        // The tap carries pan now (PFL is post-pan), so it calls the same
+        // function the master send does and lands on 1/sqrt(2) exactly —
+        // constant power, and 0.01 dB off the -3.0 dB constant it used to use.
+        // Sharing the function is the point: the two cannot drift apart.
+        const double expect = std::pow(10.0, pan_gains_db(0.0f).left / 20.0);
+        check_near("tap: mono at centre uses the pan law's centre",
+                   bench.mon(0), expect, 1e-5);
+        check_near("tap: mono at centre is the same on both lanes",
+                   bench.mon(1), expect, 1e-5);
         check_near("tap: mono is centred (L equals R)",
                    bench.mon(0) - bench.mon(1), 0.0, 1e-9);
+    }
+
+    // ---- PFL is POST-PAN ----
+    // Pan lives in the strip's send to the master, which is downstream of this
+    // tap, so the tap has to place the signal itself or every mono bus would
+    // sit dead centre in the phones however it was panned.
+    {
+        Bench bench;
+        bench.a->set_width(1);
+        bench.a->set_pan(-1.0f);           // hard left
+        bench.fill(0, 0, 1.0f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_near("tap: hard left arrives at unity on monitor L", bench.mon(0), 1.0, 1e-4);
+        check_true("tap: hard left is silent on monitor R",        bench.mon(1) < 1e-5);
+    }
+    {
+        Bench bench;
+        bench.a->set_width(1);
+        bench.a->set_pan(1.0f);            // hard right
+        bench.fill(0, 0, 1.0f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        check_true("tap: hard right is silent on monitor L",        bench.mon(0) < 1e-5);
+        check_near("tap: hard right arrives at unity on monitor R", bench.mon(1), 1.0, 1e-4);
+    }
+    {
+        // Part-panned keeps constant power, same as it does into the house.
+        Bench bench;
+        bench.a->set_width(1);
+        bench.a->set_pan(-0.5f);
+        bench.fill(0, 0, 1.0f);
+
+        std::vector<MonitorTap> taps;
+        append_monitor_taps(taps, bench.a);
+        mix_monitor_taps(2, taps, bench.index, bench.lanes, Bench::kBlockN);
+        const double power = bench.mon(0) * bench.mon(0) + bench.mon(1) * bench.mon(1);
+        check_near("tap: a part-panned bus holds constant power", power, 1.0, 1e-4);
+        check_true("tap: panned left really is louder on the left",
+                   bench.mon(0) > bench.mon(1) * 1.5);
     }
 
     // ---- Taps sum. PFL is additive; that is why it needs a clear-all ----
