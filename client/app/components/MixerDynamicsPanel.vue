@@ -33,6 +33,17 @@
           <line v-for="g in [30, 60, 90]" :key="'v' + g" class="dyn__grid" :x1="g" :x2="g" y1="0" y2="120" />
           <line v-for="g in [30, 60, 90]" :key="'h' + g" class="dyn__grid" x1="0" x2="120" :y1="g" :y2="g" />
           <line class="dyn__unity" x1="0" y1="120" x2="120" y2="0" />
+          <!-- What the processors actually do to a level: input across,
+               output down. It tracks the knobs, so the shape of a ratio or a
+               range change is visible while it is being set. -->
+          <polyline class="dyn__curve" :points="curvePoints" />
+          <!-- Where the gate starts working. -->
+          <line
+            v-if="gateActive"
+            class="dyn__thresh"
+            :x1="xFor(gateValues.threshold)" :x2="xFor(gateValues.threshold)"
+            y1="0" y2="120"
+          />
         </svg>
       </div>
 
@@ -43,20 +54,16 @@
       <div class="dyn__grmeters">
         <!-- The gate's is live: it fills downward from the top by how far the
              processor is pulling, which is the direction gain reduction
-             actually moves. The label doubles as the processor's in/out,
-             separate from the section bypass in the header — a strip can have
-             dynamics in with only one of the two working. -->
+             actually moves. Just a meter — the in/out switch lives beside the
+             processor's name, where it can be found; having it here as well
+             would be two controls for one thing. -->
         <div class="dyn__gr">
           <div class="dyn__grtrack">
             <div class="dyn__grfill" :style="{ height: gateGrPct + '%' }"></div>
           </div>
-          <button
-            class="dyn__grlabel dyn__grlabel--btn"
-            :class="{ 'dyn__grlabel--on': gateOn }"
-            :disabled="!bus"
-            :title="t('mixer.gateToggle')"
-            @click="toggleGate"
-          >{{ t('mixer.gateShort') }}</button>
+          <span class="dyn__grlabel" :class="{ 'dyn__grlabel--on': gateOn }">
+            {{ t('mixer.gateShort') }}
+          </span>
         </div>
         <div class="dyn__gr">
           <div class="dyn__grtrack"></div>
@@ -66,7 +73,21 @@
 
       <div class="dyn__controls">
         <div class="dyn__group" :class="{ 'dyn__group--out': !gateOn }">
-          <h5 class="dyn__h">{{ t('mixer.gate') }}</h5>
+          <h5 class="dyn__h">
+            {{ t('mixer.gate') }}
+            <!-- The processor's in/out, next to its name where it can be
+                 found. It was only on the meter label beside the graph, as a
+                 sideways two-letter tag, which is not a switch anyone would
+                 spot — so the section looked greyed out and inert with no
+                 obvious way to bring it in. -->
+            <button
+              class="dyn__in"
+              :class="{ 'dyn__in--on': gateOn }"
+              :disabled="!bus"
+              :title="t('mixer.gateToggle')"
+              @click="toggleGate"
+            >{{ gateOn ? t('mixer.inCircuit') : t('mixer.outOfCircuit') }}</button>
+          </h5>
           <div class="dyn__row">
             <KnobField
               v-for="p in gateParams" :key="p.field"
@@ -167,6 +188,10 @@ onBeforeUnmount(() => { if (gateSettle) clearTimeout(gateSettle); });
 function pushGate(next: BusGate, persistNow: boolean) {
   localGate.value = next;
   gateHold = true;
+  // The panel draws its own curve from localGate, but the parent holds the
+  // merged copy every other panel sees, so it is told too. Without this the
+  // parent's view of the bus goes stale for the length of the gesture.
+  emit('dsp-live', { gate: next });
   void server.setBusDsp(props.bus!.id, { gate: next }).catch(() => {});
   if (gateSettle) clearTimeout(gateSettle);
   if (persistNow) {
@@ -208,6 +233,47 @@ function toggleSection() {
   }).catch(() => {});
   emit('patch', props.bus.id, { dsp: { dynEnabled: next } } as Partial<Bus>);
 }
+
+// ---- Transfer curve ------------------------------------------------------
+// Input level across, output level down, over a 60 dB window. The diagonal is
+// unity; the gate bends the bottom-left corner downward.
+//
+// The graph is the only place the shape of a ratio or a range setting is
+// visible — the numbers alone do not tell you what a 10:1 expander with a
+// -6 dB range will actually do — so it has to track the knobs rather than
+// waiting for anything to settle.
+const GRAPH_MIN_DB = -60;
+const GRAPH_MAX_DB = 0;
+const xFor = (db: number) =>
+  ((Math.max(GRAPH_MIN_DB, Math.min(GRAPH_MAX_DB, db)) - GRAPH_MIN_DB) /
+   (GRAPH_MAX_DB - GRAPH_MIN_DB)) * 120;
+const yFor = (db: number) =>
+  120 - ((Math.max(GRAPH_MIN_DB, Math.min(GRAPH_MAX_DB, db)) - GRAPH_MIN_DB) /
+         (GRAPH_MAX_DB - GRAPH_MIN_DB)) * 120;
+
+// Both switches have to be in for the gate to be doing anything, so the curve
+// falls back to unity when either is out — the picture should agree with the
+// audio, not with the knob positions.
+const gateActive = computed(() => gateOn.value && dynIn.value);
+
+// Output level for a given input, in dB. Mirrors the engine's static curve:
+// below the threshold every decibel down costs (ratio - 1) more, until the
+// range floor stops it going further.
+function outputFor(inputDb: number): number {
+  if (!gateActive.value) return inputDb;
+  const g = gateValues.value;
+  if (inputDb >= g.threshold) return inputDb;
+  const reduction = Math.min(Math.abs(g.range),
+                             (Math.max(1, g.ratio) - 1) * (g.threshold - inputDb));
+  return inputDb - reduction;
+}
+
+const CURVE_POINTS = 61;
+const curvePoints = computed(() =>
+  Array.from({ length: CURVE_POINTS }, (_, i) => {
+    const inDb = GRAPH_MIN_DB + (i / (CURVE_POINTS - 1)) * (GRAPH_MAX_DB - GRAPH_MIN_DB);
+    return `${xFor(inDb).toFixed(2)},${yFor(outputFor(inDb)).toFixed(2)}`;
+  }).join(' '));
 
 // ---- Gain reduction ------------------------------------------------------
 // Reported per strip rather than per lane, because the gate's detector is
@@ -259,8 +325,58 @@ const compParams = [
   overflow: hidden;
 }
 .dyn__svg { display: block; width: 100%; height: 100%; }
-.dyn__grid  { stroke: var(--color-border); stroke-width: 1; opacity: 0.5; }
-.dyn__unity { stroke: var(--color-accent); stroke-width: 2; }
+/* non-scaling-stroke throughout: the viewBox is stretched to the panel with
+   preserveAspectRatio="none", so an ordinary stroke is stretched with it and
+   renders heavier — and unevenly — as the panel grows. */
+.dyn__grid  {
+  stroke: var(--color-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.5;
+}
+.dyn__curve {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
+.dyn__thresh {
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.7;
+}
+
+/* The in/out switch beside each processor's name. */
+.dyn__in {
+  margin-left: auto;
+  padding: 0 4px;
+  font-size: 8px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  cursor: pointer;
+}
+.dyn__in:hover:not(:disabled) { color: var(--color-text-primary); }
+.dyn__in:disabled { opacity: 0.4; cursor: not-allowed; }
+.dyn__in--on {
+  color: #fff;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+/* Unity is the reference the curve is read against, so it recedes: the curve
+   is the accent colour now and two accent lines would compete. */
+.dyn__unity {
+  stroke: var(--color-text-disabled);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.6;
+}
 
 /* Sized and centred to match the graph, so the two read as one block. */
 .dyn__grmeters {
@@ -306,22 +422,13 @@ const compParams = [
   writing-mode: vertical-rl;
   color: var(--color-text-disabled);
 }
-/* The label doubles as the processor's in/out switch, so it has to read as
-   pressable and to show which state it is in. */
-.dyn__grlabel--btn {
-  padding: 2px 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.dyn__grlabel--btn:hover:not(:disabled) { color: var(--color-text-primary); }
-.dyn__grlabel--btn:disabled { cursor: not-allowed; opacity: 0.5; }
 .dyn__grlabel--on { color: var(--color-accent); }
 
 /* A processor that is switched out keeps its controls readable and adjustable
    — setting a gate up before switching it in is a normal way to work — but
-   recedes so the panel says at a glance what is actually running. */
-.dyn__group--out { opacity: 0.5; }
+   recedes so the panel says at a glance what is actually running.
+   Deliberately light: at 0.5 the knobs read as disabled, and they are not. */
+.dyn__group--out { opacity: 0.7; }
 .dyn--bypassed .dyn__controls,
 .dyn--bypassed .dyn__grmeters { opacity: 0.45; }
 /* The compressor half is still a shell; the badge belongs to it alone. */
@@ -338,7 +445,12 @@ const compParams = [
   min-width: 0;
 }
 .dyn__group { display: flex; flex-direction: column; gap: 1px; }
+/* Flex so the in/out switch can sit at the far end of the heading rather than
+   trailing the text. */
 .dyn__h {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
   margin: 0;
   font-size: 9px;
   letter-spacing: 0.06em;
