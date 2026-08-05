@@ -211,6 +211,16 @@ if(LIVEPLAY_BUILD_TESTS)
     )
     add_test(NAME mixer COMMAND liveplay-mixer-tests)
 
+    # Filter sections behind the HPF, the LPF and every EQ band. Header-only,
+    # so the test needs nothing linked with it.
+    add_executable(liveplay-biquad-tests
+        tests/biquad_test.cpp
+    )
+    target_include_directories(liveplay-biquad-tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME biquad COMMAND liveplay-biquad-tests)
+
     # Waveform downsampler (single-pass decode, per-channel traces).
     add_executable(liveplay-waveform-tests
         tests/waveform_test.cpp
