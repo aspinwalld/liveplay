@@ -15,10 +15,11 @@
       :origin="origin"
       :step="step"
       :fine-step="fineStep"
+      :taper="taper"
       :size="size"
       :disabled="disabled"
       :title="label"
-      @input="v => $emit('input', v)"
+      @input="onKnob"
       @reset="$emit('input', origin)"
     />
     <label class="kf__val">
@@ -47,6 +48,8 @@ const props = withDefaults(defineProps<{
   origin?: number;
   step?: number;
   fineStep?: number;
+  /** See Knob: 'log' for anything in Hertz or milliseconds. */
+  taper?: 'linear' | 'log';
   size?: number;
   decimals?: number;
   unit?: string;
@@ -57,6 +60,7 @@ const props = withDefaults(defineProps<{
   origin: 0,
   step: 0.1,
   fineStep: 0.01,
+  taper: 'linear',
   size: 34,
   decimals: 1,
   unit: '',
@@ -68,6 +72,17 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ (e: 'input', value: number): void }>();
 
 const display = computed(() => props.value.toFixed(props.decimals));
+
+// Round to the precision actually shown before passing it on.
+//
+// A log taper does not snap to a step — a fixed grid would quantise the bottom
+// of the range into a few positions and do nothing at the top — so without
+// this the box would read 1023 Hz while the value was 1023.4567, and typing
+// the number back would be a change. What is displayed is what is stored.
+function onKnob(v: number) {
+  const p = Math.pow(10, props.decimals);
+  emit('input', Math.round(v * p) / p);
+}
 
 // Typed values are clamped rather than rejected: an operator entering 20000 on
 // a control that stops at 18000 means "as high as it goes", not "ignore me".

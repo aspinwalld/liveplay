@@ -79,8 +79,13 @@
          it. Double-click parks it. The label lights when it is in circuit. -->
     <div class="cf__filters">
       <div class="cf__filterrow">
+        <!-- Logarithmic, as every frequency control is: 40 to 80 Hz is the
+             same musical move as 200 to 400, so both should take the same
+             arc. Linear here would bury the whole useful bottom end in the
+             first few degrees of travel. -->
         <KnobField
           :value="hpfHz" :min="HPF_PARKED_HZ" :max="800" :origin="HPF_PARKED_HZ"
+          taper="log"
           :decimals="0" unit="Hz" :label="t('mixer.hpf')" :size="34"
           :class="{ 'cf__filter--in': hpfIn }"
           :title="hpfIn ? t('mixer.hpf') : t('mixer.filterParked')"
@@ -88,6 +93,7 @@
         />
         <KnobField
           :value="lpfHz" :min="1000" :max="LPF_PARKED_HZ" :origin="LPF_PARKED_HZ"
+          taper="log"
           :decimals="0" unit="Hz" :label="t('mixer.lpf')" :size="34"
           :class="{ 'cf__filter--in': lpfIn }"
           :title="lpfIn ? t('mixer.lpf') : t('mixer.filterParked')"

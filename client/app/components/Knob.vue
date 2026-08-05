@@ -46,6 +46,23 @@ const props = withDefaults(defineProps<{
   origin?: number;
   step?: number;
   fineStep?: number;
+  /**
+   * How the value is spread around the dial.
+   *
+   * 'linear' suits anything already perceptually even: decibels, pan, a ratio
+   * of two levels. 'log' suits anything measured in Hertz or in time, where
+   * what the ear notices is the ratio between two values, not the difference.
+   *
+   * A 20 Hz to 20 kHz frequency control on a linear taper puts 1 kHz at 5% of
+   * travel and spends the top three quarters of the dial between 5 kHz and
+   * 20 kHz, which is the least interesting part of the range. Every EQ ever
+   * built uses a logarithmic frequency taper, and this is why.
+   *
+   * Falls back to linear when the range crosses or touches zero, since the
+   * logarithm of zero has nowhere to go. That keeps a control like a 0-1000 ms
+   * hold time safe to declare 'log' without special-casing at the call site.
+   */
+  taper?: 'linear' | 'log';
   /** Diameter in px. */
   size?: number;
   disabled?: boolean;
@@ -56,6 +73,7 @@ const props = withDefaults(defineProps<{
   origin: 0,
   step: 0.02,
   fineStep: 0.005,
+  taper: 'linear',
   size: 34,
   disabled: false,
   title: '',
@@ -76,8 +94,30 @@ const range = computed(() => props.max - props.min);
 const START_ANGLE = Math.PI * 0.75;
 const SWEEP       = Math.PI * 1.5;
 
-const norm = (v: number) =>
-  Math.max(0, Math.min(1, (v - props.min) / (range.value || 1)));
+// Whether the log taper is usable: it needs a strictly positive range, since
+// log(0) is unbounded and a range spanning zero has no ratio to speak of.
+const useLog = computed(() =>
+  props.taper === 'log' && props.min > 0 && props.max > props.min);
+
+const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
+
+// Value -> 0..1 around the dial, and back. Everything else works in this
+// normalised space, so the taper is decided in exactly one place and the
+// pointer, the arc, the drag and the wheel cannot disagree about it.
+const norm = (v: number): number => {
+  if (useLog.value) {
+    const lo = Math.log(props.min);
+    return clamp01((Math.log(Math.max(props.min, v)) - lo) /
+                   (Math.log(props.max) - lo));
+  }
+  return clamp01((v - props.min) / (range.value || 1));
+};
+const denorm = (n: number): number => {
+  const t = clamp01(n);
+  return useLog.value
+    ? props.min * Math.pow(props.max / props.min, t)
+    : props.min + t * range.value;
+};
 const angleFor = (v: number) => START_ANGLE + norm(v) * SWEEP;
 
 function readCssVar(name: string, fallback: string): string {
@@ -153,7 +193,8 @@ function draw() {
   ctx.stroke();
 }
 
-watch(() => [props.value, props.min, props.max, props.origin, props.disabled], () => draw());
+watch(() => [props.value, props.min, props.max, props.origin, props.disabled, props.taper],
+      () => draw());
 
 let resizeObserver: ResizeObserver | null = null;
 let themeObserver: MutationObserver | null = null;
@@ -199,8 +240,11 @@ function onMouseMove(e: MouseEvent) {
   if (!dragging) return;
   const dy = dragStartY - e.clientY;      // dragging up = positive
   const sens = e.shiftKey ? 0.25 : 1;
-  const perPx = (range.value / DRAG_TRAVEL_PX) * sens;
-  emit('input', clampToStep(dragStartVal + dy * perPx, e.shiftKey));
+  // Travel is measured around the dial, not in value units, so the same drag
+  // covers the same arc whatever the taper. On a linear control this is the
+  // identical arithmetic as before.
+  const dn = (dy / DRAG_TRAVEL_PX) * sens;
+  emit('input', finalise(denorm(norm(dragStartVal) + dn), e.shiftKey));
 }
 
 function onMouseUp() {
@@ -209,16 +253,34 @@ function onMouseUp() {
   window.removeEventListener('mouseup', onMouseUp);
 }
 
+// One wheel notch as a fraction of the dial, for a log control. A step
+// expressed in value units is meaningless there: 10 Hz is a big move at the
+// bottom of a frequency range and invisible at the top.
+const LOG_WHEEL_STEP = 1 / 120;
+const LOG_WHEEL_FINE = 1 / 480;
+
 function onWheel(e: WheelEvent) {
   if (props.disabled) return;
+  const dir = e.deltaY < 0 ? 1 : -1;
+  if (useLog.value) {
+    const dn = (e.shiftKey ? LOG_WHEEL_FINE : LOG_WHEEL_STEP) * dir;
+    emit('input', finalise(denorm(norm(props.value) + dn), e.shiftKey));
+    return;
+  }
   const step = e.shiftKey ? props.fineStep : props.step;
-  const dir  = e.deltaY < 0 ? 1 : -1;
-  emit('input', clampToStep(props.value + dir * step, e.shiftKey));
+  emit('input', finalise(props.value + dir * step, e.shiftKey));
 }
 
-function clampToStep(v: number, fine: boolean): number {
-  const step = fine ? props.fineStep : props.step;
-  const snapped = step > 0 ? Math.round(v / step) * step : v;
+function finalise(v: number, fine: boolean): number {
+  // Step snapping only applies to a linear control. Snapping a log value to a
+  // fixed grid would quantise the bottom of the range into a handful of
+  // positions while doing nothing at all at the top; the caller's `decimals`
+  // is what rounds a log value, and KnobField applies it.
+  const snapped = (() => {
+    if (useLog.value) return v;
+    const step = fine ? props.fineStep : props.step;
+    return step > 0 ? Math.round(v / step) * step : v;
+  })();
   const clamped = Math.max(props.min, Math.min(props.max, snapped));
   // Avoid -0 noise, and the float dust that rounding to a fractional step
   // leaves behind (0.02 * 3 = 0.06000000000000001).

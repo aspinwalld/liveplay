@@ -72,10 +72,14 @@
         :class="{ 'eq__bandname--in': b.gain !== 0 }"
       >{{ EQ_BAND_NAMES[i] }}</span>
 
+      <!-- Frequency is logarithmic: what the ear hears is the ratio between
+           two frequencies, so an octave should take the same arc wherever it
+           sits. On a linear taper 1 kHz would land at 5% of travel. -->
       <span class="eq__rowlabel">{{ t('mixer.freq') }}</span>
       <KnobField
         v-for="(b, i) in bands" :key="'f' + i"
         :value="b.freq" :min="20" :max="20000" :origin="bandDefaults[i]!.freq"
+        taper="log"
         :decimals="0" unit="Hz" :size="30" :show-label="false"
         :disabled="!bus"
         @input="(v: number) => onBand(i, 'freq', v)"
@@ -90,10 +94,14 @@
         @input="(v: number) => onBand(i, 'gain', v)"
       />
 
+      <!-- Q is logarithmic too: 0.5 to 1 is the same change of shape as 4 to
+           8, and a linear taper would waste most of the dial above Q 3 where
+           the differences stop being audible. -->
       <span class="eq__rowlabel">{{ t('mixer.q') }}</span>
       <KnobField
         v-for="(b, i) in bands" :key="'q' + i"
         :value="b.q" :min="0.1" :max="10" :origin="bandDefaults[i]!.q"
+        taper="log"
         :decimals="2" :size="30" :show-label="false"
         :disabled="!bus"
         @input="(v: number) => onBand(i, 'q', v)"
