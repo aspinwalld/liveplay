@@ -32,10 +32,16 @@
         <svg viewBox="0 0 120 120" preserveAspectRatio="none" class="dyn__svg">
           <line v-for="g in [30, 60, 90]" :key="'v' + g" class="dyn__grid" :x1="g" :x2="g" y1="0" y2="120" />
           <line v-for="g in [30, 60, 90]" :key="'h' + g" class="dyn__grid" x1="0" x2="120" :y1="g" :y2="g" />
+          <!-- Unity, as a dashed guide: bottom-left is quiet in and quiet out,
+               top-right is loud in and loud out. The curve below sits on this
+               wherever nothing is being done to the signal. -->
           <line class="dyn__unity" x1="0" y1="120" x2="120" y2="0" />
-          <!-- What the processors actually do to a level: input across,
-               output down. It tracks the knobs, so the shape of a ratio or a
-               range change is visible while it is being set. -->
+          <!-- ONE curve for both processors, which is the point of sharing the
+               graph: the gate bends the bottom-left corner down and the
+               compressor will flatten the top-right, and what you want to see
+               is the single shape the two of them together impose. It tracks
+               the knobs, so the effect of a ratio or a range is visible while
+               it is being set. -->
           <polyline class="dyn__curve" :points="curvePoints" />
           <!-- Where the gate starts working. -->
           <line
@@ -369,13 +375,19 @@ const compParams = [
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
-/* Unity is the reference the curve is read against, so it recedes: the curve
-   is the accent colour now and two accent lines would compete. */
+/* Unity is a GUIDE, not a second curve, and it has to look like one.
+
+   Drawn solid it was indistinguishable from the transfer curve, which lies
+   exactly on top of it everywhere the processors are doing nothing — so the
+   two strokes coincided above the threshold and read as a single heavier
+   line, then separated below it and looked like two different curves. Dashed
+   and faint, the curve reads as sitting on the guide. */
 .dyn__unity {
   stroke: var(--color-text-disabled);
   stroke-width: 1;
+  stroke-dasharray: 3 3;
   vector-effect: non-scaling-stroke;
-  opacity: 0.6;
+  opacity: 0.35;
 }
 
 /* Sized and centred to match the graph, so the two read as one block. */
