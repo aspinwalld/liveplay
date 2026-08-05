@@ -30,6 +30,8 @@
           class="eq__grid" x1="0" x2="400" :y1="yFor(g)" :y2="yFor(g)"
         />
         <line class="eq__zero" x1="0" x2="400" :y1="yFor(0)" :y2="yFor(0)" />
+        <!-- The grid lines are stretched with the box too; pinning their width
+             the same way stops them thickening as the panel grows. -->
         <polyline class="eq__curve" :points="curvePoints" />
       </svg>
       <span
@@ -220,9 +222,28 @@ const handleColor = (i: number) =>
   overflow: hidden;
 }
 .eq__svg { display: block; width: 100%; height: 100%; }
-.eq__grid  { stroke: var(--color-border); stroke-width: 1; opacity: 0.5; }
-.eq__zero  { stroke: var(--color-text-disabled); stroke-width: 1; }
-.eq__curve { fill: none; stroke: var(--color-accent); stroke-width: 2; }
+.eq__grid  {
+  stroke: var(--color-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.5;
+}
+.eq__zero  {
+  stroke: var(--color-text-disabled);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+/* non-scaling-stroke matters here. The viewBox is stretched to the panel with
+   preserveAspectRatio="none", so an ordinary stroke is scaled with it and
+   renders far heavier than the number suggests. This pins the line to a real
+   device width, which is also what keeps it even as the panel resizes. */
+.eq__curve {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
 
 .eq__handle {
   position: absolute;

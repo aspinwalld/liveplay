@@ -44,6 +44,7 @@
         :next-id="nextId"
         @patch="(id: string, p: Partial<Bus>) => $emit('patch', id, p)"
         @select="(id: string) => $emit('select', id)"
+        @dsp-live="onDspLive"
       />
 
       <!-- Two columns. EQ takes the height on the left with the plugin rack
@@ -52,8 +53,10 @@
            than stacked because stacking them made both too short to use. -->
       <div class="det__work">
         <!-- The curve needs the bus: it draws the channel's high- and low-pass
-           alongside the EQ bands, and those live on the fader column. -->
-      <MixerEqPanel class="det__eq" :bus="bus" />
+           alongside the EQ bands, and those live on the fader column. It gets
+           the live-merged copy so it tracks a filter knob while it is moving,
+           not 250 ms later when the value settles onto the bus. -->
+      <MixerEqPanel class="det__eq" :bus="curveBus" />
 
         <!-- Static height, packed as tight as the slots allow: the rack is a
              list of six things, not a workspace, so it should never take room
@@ -180,8 +183,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
-import type { Bus } from '~/types/project';
+import { computed, ref, watch } from 'vue';
+import type { Bus, BusDsp } from '~/types/project';
 import MixerChannelFader from './MixerChannelFader.vue';
 import MixerEqPanel from './MixerEqPanel.vue';
 import MixerDynamicsPanel from './MixerDynamicsPanel.vue';
@@ -203,6 +206,26 @@ const emit = defineEmits<{
 
 const { t } = useLocalization();
 const { findItemByUuid } = useProject();
+
+// The filter values as they are being dragged, ahead of the bus catching up.
+//
+// The fader column owns the knobs and the EQ panel draws the curve, so the
+// in-flight value has to cross between them. It is held here, at their nearest
+// common parent, rather than in shared module state — this is the only place
+// that needs to know, and it clears itself when the channel changes.
+const liveDsp = ref<BusDsp | null>(null);
+watch(() => props.bus?.id, () => { liveDsp.value = null; });
+// Once the settled value has landed on the bus, stop overriding with a stale
+// copy of the same thing.
+watch(() => props.bus?.dsp, () => { liveDsp.value = null; }, { deep: true });
+
+function onDspLive(dsp: BusDsp) { liveDsp.value = dsp; }
+
+const curveBus = computed<Bus | null>(() => {
+  if (!props.bus) return null;
+  if (!liveDsp.value) return props.bus;
+  return { ...props.bus, dsp: { ...props.bus.dsp, ...liveDsp.value } };
+});
 
 // Stepping order follows the rail, and includes buses the engine currently has
 // no strip for — they are still channels, and skipping them would make the

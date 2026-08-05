@@ -117,7 +117,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import type { Bus } from '~/types/project';
+import type { Bus, BusDsp } from '~/types/project';
 import { HPF_PARKED_HZ, LPF_PARKED_HZ } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import StereoMeter from './StereoMeter.vue';
@@ -139,6 +139,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'patch', id: string, patch: Partial<Bus>): void;
   (e: 'select', id: string): void;
+  /**
+   * The in-flight filter values, on every drag event rather than on settle.
+   *
+   * The EQ curve draws these filters, but it reads them off the bus, and the
+   * bus is only rewritten when the gesture settles 250 ms later. Without this
+   * the curve sat still while the knob moved and then jumped once it was let
+   * go, which reads as a broken display rather than a deliberate delay.
+   */
+  (e: 'dsp-live', dsp: BusDsp): void;
 }>();
 
 const { t } = useLocalization();
@@ -224,22 +233,24 @@ watch(() => props.bus.dsp, v => {
 const hpfIn = computed(() => hpfHz.value > HPF_PARKED_HZ);
 const lpfIn = computed(() => lpfHz.value < LPF_PARKED_HZ);
 
-function pushFilters() {
-  filtHold = true;
-  void server.setBusDsp(props.bus.id, {
+function currentDsp(): BusDsp {
+  return {
     hpf: { freq: hpfHz.value, q: props.bus.dsp?.hpf?.q ?? 0.7071 },
     lpf: { freq: lpfHz.value, q: props.bus.dsp?.lpf?.q ?? 0.7071 },
-  }).catch(() => {});
+  };
+}
+
+function pushFilters() {
+  filtHold = true;
+  const dsp = currentDsp();
+  // The curve is told first, so it tracks the knob rather than the round trip.
+  emit('dsp-live', dsp);
+  void server.setBusDsp(props.bus.id, dsp).catch(() => {});
   if (filtSettle) clearTimeout(filtSettle);
   filtSettle = setTimeout(() => {
     filtSettle = null;
     filtHold   = false;
-    emit('patch', props.bus.id, {
-      dsp: {
-        hpf: { freq: hpfHz.value, q: props.bus.dsp?.hpf?.q ?? 0.7071 },
-        lpf: { freq: lpfHz.value, q: props.bus.dsp?.lpf?.q ?? 0.7071 },
-      },
-    } as Partial<Bus>);
+    emit('patch', props.bus.id, { dsp: currentDsp() } as Partial<Bus>);
   }, 250);
 }
 
