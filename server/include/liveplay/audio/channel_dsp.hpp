@@ -40,6 +40,7 @@
 #pragma once
 
 #include "liveplay/audio/biquad.hpp"
+#include "liveplay/audio/dynamics.hpp"
 #include "liveplay/audio/types.hpp"
 
 #include <array>
@@ -59,6 +60,12 @@ struct StripCoeffs {
     BiquadCoeffs hpf;
     BiquadCoeffs lpf;
     std::array<BiquadCoeffs, kEqBands> eq;
+    // The gate rides in the same published slot as the filter coefficients, so
+    // there is one handover to the render thread rather than two that could
+    // land a block apart. Not ramped: a threshold or a ratio is meant to take
+    // effect when you set it, and the gate's own attack and release are
+    // already the smoothing that matters here.
+    GateCoeffs gate;
 };
 
 // What the operator set. Plain values, owned by the control thread.
@@ -76,6 +83,7 @@ struct EqBandParams {
 };
 
 struct StripDspParams {
+    GateParams   gate;
     FilterParams hpf{false, 80.0f,    0.70710678f};
     FilterParams lpf{false, 18000.0f, 0.70710678f};
     std::array<EqBandParams, kEqBands> eq{{
@@ -117,6 +125,7 @@ public:
                           ? biquad_peaking(b.freq_hz, fs, b.gain_db, b.q)
                           : biquad_passthrough();
         }
+        c.gate = gate_coeffs(p.gate, fs);
         publish(c);
         any_active_.store(needs_processing(p), std::memory_order_release);
     }
@@ -153,11 +162,24 @@ public:
         lerp(active_.hpf, target.hpf, kRamp);
         lerp(active_.lpf, target.lpf, kRamp);
         for (std::size_t i = 0; i < kEqBands; ++i) lerp(active_.eq[i], target.eq[i], kRamp);
+        // Taken whole, not ramped. These are thresholds and time constants
+        // rather than filter coefficients: interpolating them would mean a
+        // threshold crawling to where it was set, and the gate's own attack
+        // and release already provide the smoothing that matters.
+        //
+        // It also has to be copied at all, which is the point. Leaving it out
+        // meant the render thread kept reading a default-constructed gate —
+        // permanently disabled — while every parameter change published
+        // correctly into a slot nothing ever looked at.
+        active_.gate = target.gate;
     }
 
     // Filter one lane's block in place. `lane` selects which lane's filter
     // memory to use — sharing history across lanes would smear the image.
-    void process_block(ChannelIndex lane, Sample* buf, std::size_t frames) noexcept {
+    //
+    // Tone only. The dynamics run across every lane at once (see process), so
+    // they cannot be folded into a per-lane call.
+    void process_tone(ChannelIndex lane, Sample* buf, std::size_t frames) noexcept {
         if (lane >= kMixerLanes) return;
         auto& st = state_[lane];
         for (std::size_t s = 0; s < frames; ++s) {
@@ -169,9 +191,30 @@ public:
         }
     }
 
+    // The whole chain, for one block: tone per lane, then dynamics across all
+    // of them together.
+    //
+    // The dynamics have to see every lane at once, because the detector is
+    // linked — one gain for the strip, so gating cannot pull the stereo image
+    // sideways. That is why this takes the lanes as a set rather than being
+    // called once per lane like the filters.
+    void process(Sample* const* lanes, ChannelCount count, std::size_t frames) noexcept {
+        advance_coeffs();
+        for (ChannelCount l = 0; l < count && l < kMixerLanes; ++l) {
+            process_tone(l, lanes[l], frames);
+        }
+        gate_.process(active_.gate, lanes, std::min<ChannelCount>(count, kMixerLanes), frames);
+    }
+
+    // How far the gate is pulling the strip down, for its meter.
+    float gate_reduction_db() const noexcept { return gate_.gain_reduction_db(); }
+
     // Drop every section's memory. For when a strip's signal source changes
     // underneath it and the old tail is no longer meaningful.
-    void reset() noexcept { for (auto& lane : state_) lane.reset(); }
+    void reset() noexcept {
+        for (auto& lane : state_) lane.reset();
+        gate_.reset();
+    }
 
 private:
     struct LaneState {
@@ -186,7 +229,7 @@ private:
     };
 
     static bool needs_processing(const StripDspParams& p) noexcept {
-        if (p.hpf.enabled || p.lpf.enabled) return true;
+        if (p.hpf.enabled || p.lpf.enabled || p.gate.enabled) return true;
         for (const auto& b : p.eq) if (b.enabled && b.gain_db != 0.0f) return true;
         return false;
     }
@@ -227,6 +270,7 @@ private:
 
     StripCoeffs                       active_{};          // render thread only
     std::array<LaneState, kMixerLanes> state_{};          // render thread only
+    GateState                         gate_{};            // render thread only
     std::uint32_t                     seen_generation_{0}; // render thread only
     int                               settle_blocks_{0};   // render thread only
 };

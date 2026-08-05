@@ -221,6 +221,15 @@ if(LIVEPLAY_BUILD_TESTS)
     )
     add_test(NAME biquad COMMAND liveplay-biquad-tests)
 
+    # Expander / gate, and the compressor when it lands. Header-only too.
+    add_executable(liveplay-dynamics-tests
+        tests/dynamics_test.cpp
+    )
+    target_include_directories(liveplay-dynamics-tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME dynamics COMMAND liveplay-dynamics-tests)
+
     # Waveform downsampler (single-pass decode, per-channel traces).
     add_executable(liveplay-waveform-tests
         tests/waveform_test.cpp

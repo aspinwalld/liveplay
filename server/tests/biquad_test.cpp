@@ -258,7 +258,7 @@ double chain_response_db(ChannelDsp& dsp, ChannelIndex lane,
             buf[s] = in[s];
         }
         dsp.advance_coeffs();
-        dsp.process_block(lane, buf.data(), kBlock);
+        dsp.process_tone(lane, buf.data(), kBlock);
         // Ignore the first half: coefficients ramp, and the sections settle.
         if (b > blocks / 2) {
             for (std::size_t s = 0; s < kBlock; ++s) {
@@ -293,7 +293,7 @@ void test_chain_transparency() {
             buf[s]  = orig[s];
         }
         dsp.advance_coeffs();
-        dsp.process_block(0, buf.data(), kBlock);
+        dsp.process_tone(0, buf.data(), kBlock);
         for (std::size_t s = 0; s < kBlock; ++s)
             worst = std::max(worst, std::fabs(static_cast<double>(buf[s] - orig[s])));
     }
@@ -333,8 +333,8 @@ void test_chain_lane_independence() {
             right[s] = 0.0f;                      // the other side is silent
         }
         dsp.advance_coeffs();
-        dsp.process_block(0, left.data(),  kBlock);
-        dsp.process_block(1, right.data(), kBlock);
+        dsp.process_tone(0, left.data(),  kBlock);
+        dsp.process_tone(1, right.data(), kBlock);
         for (float v : right) right_peak = std::max(right_peak, std::fabs((double)v));
     }
     check_true("chain: a silent lane stays silent beside a loud one", right_peak == 0.0);
@@ -393,7 +393,7 @@ void test_chain_ramps_out() {
             buf[s]  = orig[s];
         }
         dsp.advance_coeffs();
-        dsp.process_block(0, buf.data(), kBlock);
+        dsp.process_tone(0, buf.data(), kBlock);
         for (std::size_t s = 0; s < kBlock; ++s)
             worst = std::max(worst, std::fabs(static_cast<double>(buf[s] - orig[s])));
     }

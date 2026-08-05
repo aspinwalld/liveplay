@@ -3625,6 +3625,17 @@ void merge_bus_dsp(const json& src, BusDsp& out) {
     };
     if (src.contains("hpf")) filter(src["hpf"], out.hpf);
     if (src.contains("lpf")) filter(src["lpf"], out.lpf);
+    if (src.contains("gate") && src["gate"].is_object()) {
+        const auto& g = src["gate"];
+        auto& o = out.gate;
+        out.gate_on   = g.value("on", out.gate_on);
+        o.threshold_db = std::clamp(g.value("threshold", o.threshold_db), -80.0f, 0.0f);
+        o.ratio        = std::clamp(g.value("ratio",     o.ratio),         1.0f, 20.0f);
+        o.range_db     = std::clamp(g.value("range",     o.range_db),    -80.0f, 0.0f);
+        o.attack_ms    = std::clamp(g.value("attack",    o.attack_ms),     0.1f, 100.0f);
+        o.hold_ms      = std::clamp(g.value("hold",      o.hold_ms),       0.0f, 1000.0f);
+        o.release_ms   = std::clamp(g.value("release",   o.release_ms),    5.0f, 5000.0f);
+    }
     if (src.contains("eq") && src["eq"].is_array()) {
         const auto& arr = src["eq"];
         for (std::size_t i = 0; i < kBusEqBands && i < arr.size(); ++i) {
@@ -3648,6 +3659,15 @@ json bus_dsp_to_json(const BusDsp& d) {
         {"hpf", json{{"freq", d.hpf.freq_hz}, {"q", d.hpf.q}}},
         {"lpf", json{{"freq", d.lpf.freq_hz}, {"q", d.lpf.q}}},
         {"eq",  std::move(eq)},
+        {"gate", json{
+            {"on",        d.gate_on},
+            {"threshold", d.gate.threshold_db},
+            {"ratio",     d.gate.ratio},
+            {"range",     d.gate.range_db},
+            {"attack",    d.gate.attack_ms},
+            {"hold",      d.gate.hold_ms},
+            {"release",   d.gate.release_ms},
+        }},
     };
 }
 
@@ -3977,6 +3997,18 @@ audio::StripDspParams ProjectState::dsp_params_for(const BusDef& bus) {
         dst.q       = src.q;
         dst.enabled = bus.dsp.eq_enabled && src.gain_db != 0.0f;
     }
+
+    // The gate needs both switches: its own, and the dynamics section's
+    // bypass. A ratio of 1 is also a no-op, so it is treated as off rather
+    // than run to multiply by one.
+    p.gate.enabled      = bus.dsp.dyn_enabled && bus.dsp.gate_on &&
+                          bus.dsp.gate.ratio > 1.0f && bus.dsp.gate.range_db < 0.0f;
+    p.gate.threshold_db = bus.dsp.gate.threshold_db;
+    p.gate.ratio        = bus.dsp.gate.ratio;
+    p.gate.range_db     = bus.dsp.gate.range_db;
+    p.gate.attack_ms    = bus.dsp.gate.attack_ms;
+    p.gate.hold_ms      = bus.dsp.gate.hold_ms;
+    p.gate.release_ms   = bus.dsp.gate.release_ms;
     return p;
 }
 

@@ -119,6 +119,17 @@ struct BusEqBand {
 
 inline constexpr std::size_t kBusEqBands = 4;
 
+// The expander / gate, as the project stores it. Defaults match what the
+// surface shows so a fresh bus does not look pre-adjusted.
+struct BusGate {
+    float threshold_db = -40.0f;
+    float ratio        = 2.0f;
+    float range_db     = -20.0f;
+    float attack_ms    = 1.0f;
+    float hold_ms      = 10.0f;
+    float release_ms   = 100.0f;
+};
+
 struct BusDsp {
     // Section bypass. Separate from a band being flat: bypass takes the whole
     // section out in one press and, crucially, PUTS IT BACK exactly as it was.
@@ -127,6 +138,10 @@ struct BusDsp {
     // section rather than expecting you to undo your way back.
     bool      eq_enabled  = true;
     bool      dyn_enabled = true;
+    // Whether the gate is in circuit at all. Separate from the section bypass:
+    // a strip can have dynamics switched in with only the compressor working.
+    bool      gate_on     = false;
+    BusGate   gate;
     BusFilter hpf{20.0f};       // parked at the bottom: out of circuit
     BusFilter lpf{20000.0f};    // parked at the top: out of circuit
     // Conventional four-band starting layout, matching what the surface shows.

@@ -1230,21 +1230,30 @@ void AudioEngine::render_one_block(const Topology& topo) {
         }
     }
 
-    // ---- Tier-2 strip processing: the tone chain ----
-    // HPF, LPF and EQ, in place on each bus's accumulators, before the tap and
-    // before the fader. This is the console order — you are filtering the
-    // channel, not the send — and it is what makes PFL post-processing.
+    // ---- Tier-2 strip processing: the channel chain ----
+    // HPF, LPF, EQ and the gate, in place on each bus's accumulators, before
+    // the tap and before the fader. This is the console order — you are
+    // processing the channel, not the send — and it is what makes PFL
+    // post-processing.
     //
     // It runs regardless of mute, because PFL is pre-mute: a muted channel
     // still has to be checkable in the phones. Strips whose controls are all
     // flat report inactive and cost nothing, which is most of them.
+    //
+    // Every lane goes in together rather than one at a time: the gate's
+    // detector is linked across them, so it has to see the whole strip.
     for (std::size_t i = 0; i < active_mixers.size(); ++i) {
         auto& dsp = active_mixers[i]->dsp();
         if (!dsp.needs_processing()) continue;
-        dsp.advance_coeffs();            // once per block, so both lanes match
+        Sample* lanes[kMixerLanes];
         for (ChannelIndex lane = 0; lane < kMixerLanes; ++lane) {
-            dsp.process_block(lane, mixer_accumulators_[i * kMixerLanes + lane].data(), block);
+            lanes[lane] = mixer_accumulators_[i * kMixerLanes + lane].data();
         }
+        // A mono strip's lane 1 carries nothing, so keying the gate on it
+        // would hold the detector at silence and shut the strip down.
+        const ChannelCount used = std::min<ChannelCount>(
+            std::max<ChannelCount>(1, active_mixers[i]->width()), kMixerLanes);
+        dsp.process(lanes, used, block);
     }
 
     // ---- PFL taps into the Monitor strip ----
