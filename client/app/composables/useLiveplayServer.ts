@@ -22,7 +22,7 @@
 //   watch(server.connected, ...);        // react to connection state
 // =====================================================================
 import { reactive, ref, shallowRef, computed } from 'vue';
-import type { Bus } from '~/types/project';
+import type { Bus, BusDsp } from '~/types/project';
 import type {
   CueId,
   DeviceId,
@@ -935,6 +935,17 @@ function createClient() {
     return rest<{ cleared: number }>('/api/buses/pfl/clear', { method: 'POST' });
   }
 
+  // Live tone controls for the duration of a filter drag. Coefficients go
+  // straight to the strip — no document write, no refetch — exactly as
+  // setBusPan does, and for the same reason: a PATCH per drag event would
+  // rewrite the document and bounce the knob to the stale value.
+  async function setBusDsp(id: string, dsp: Partial<BusDsp>) {
+    return rest(`/api/buses/${encodeURIComponent(id)}/dsp`, {
+      method: 'POST',
+      body: JSON.stringify(dsp),
+    });
+  }
+
   async function deleteBus(id: string) {
     await rest(`/api/buses/${encodeURIComponent(id)}`, { method: 'DELETE' });
     await fetchBuses();
@@ -1250,6 +1261,7 @@ function createClient() {
     createBus,
     patchBus,
     setBusPan,
+    setBusDsp,
     setBusPfl,
     clearAllPfl,
     deleteBus,

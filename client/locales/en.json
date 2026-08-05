@@ -602,6 +602,7 @@
     "compShort": "COMP",
     "hpf": "HPF",
     "lpf": "LPF",
+    "filterParked": "Parked at the end of its travel — out of circuit. Turn it in, or double-click to park it again.",
     "freq": "Freq",
     "gain": "Gain",
     "q": "Q",

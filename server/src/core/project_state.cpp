@@ -3644,6 +3644,16 @@ void ProjectState::load_buses_locked() {
             d.gain_db      = b.value("gainDb", 0.0f);
             d.muted        = b.value("mute", false);
             d.pan          = std::clamp(b.value("pan", 0.0f), -1.0f, 1.0f);
+            if (b.contains("dsp") && b["dsp"].is_object()) {
+                const auto& dsp = b["dsp"];
+                const auto filter = [](const json& src, float parked, BusFilter& out) {
+                    if (!src.is_object()) return;
+                    out.freq_hz = src.value("freq", parked);
+                    out.q       = std::clamp(src.value("q", 0.70710678f), 0.1f, 40.0f);
+                };
+                if (dsp.contains("hpf")) filter(dsp["hpf"], kHpfParkedHz, d.dsp.hpf);
+                if (dsp.contains("lpf")) filter(dsp["lpf"], kLpfParkedHz, d.dsp.lpf);
+            }
             if (b.contains("output") && b["output"].is_object()) {
                 const auto& out = b["output"];
                 const auto kind = out.value("type", std::string{"master"});
@@ -3792,6 +3802,10 @@ void ProjectState::write_buses_to_document_locked() {
             {"gainDb", b.gain_db},
             {"mute",   b.muted},
             {"pan",    b.pan},
+            {"dsp",    json{
+                {"hpf", json{{"freq", b.dsp.hpf.freq_hz}, {"q", b.dsp.hpf.q}}},
+                {"lpf", json{{"freq", b.dsp.lpf.freq_hz}, {"q", b.dsp.lpf.q}}},
+            }},
             {"output", json{{"type", kind}, {"target", b.output_target}}},
         });
     }
@@ -3903,6 +3917,50 @@ std::size_t ProjectState::rewire_buses_for_output_map() {
                      bus.display_name, bus.output_target);
     }
     return moved;
+}
+
+audio::StripDspParams ProjectState::dsp_params_for(const BusDef& bus) {
+    audio::StripDspParams p;
+    // Parked is out of circuit. A filter left at the end of its travel should
+    // be a genuine passthrough, not a 20 Hz section still bending phase across
+    // the bottom of the band — which is what "off" has to mean when the knob
+    // itself is the only control.
+    p.hpf.freq_hz = bus.dsp.hpf.freq_hz > 0.0f ? bus.dsp.hpf.freq_hz : kHpfParkedHz;
+    p.hpf.q       = bus.dsp.hpf.q;
+    p.hpf.enabled = p.hpf.freq_hz > kHpfParkedHz;
+
+    p.lpf.freq_hz = bus.dsp.lpf.freq_hz > 0.0f ? bus.dsp.lpf.freq_hz : kLpfParkedHz;
+    p.lpf.q       = bus.dsp.lpf.q;
+    p.lpf.enabled = p.lpf.freq_hz < kLpfParkedHz;
+    return p;
+}
+
+bool ProjectState::set_bus_dsp_live(const std::string& id, const json& dsp) {
+    BusDef def;
+    audio::MixerChannelId mixer;
+    {
+        std::lock_guard lock{mutex_};
+        const auto bit = std::find_if(buses_.begin(), buses_.end(),
+                                      [&](const BusDef& b) { return b.id == id; });
+        if (bit == buses_.end()) return false;
+        def   = *bit;             // a copy: this is the in-gesture value
+        mixer = mixer_for_bus(id);
+    }
+    if (mixer.empty()) return false;
+
+    // Deliberately not written back to buses_, exactly as pan is not. patch_bus
+    // persists the settled value and re-applies the same coefficients.
+    if (dsp.is_object()) {
+        const auto filter = [](const json& src, float parked, BusFilter& out) {
+            if (!src.is_object()) return;
+            out.freq_hz = src.value("freq", parked);
+            out.q       = std::clamp(src.value("q", out.q), 0.1f, 40.0f);
+        };
+        if (dsp.contains("hpf")) filter(dsp["hpf"], kHpfParkedHz, def.dsp.hpf);
+        if (dsp.contains("lpf")) filter(dsp["lpf"], kLpfParkedHz, def.dsp.lpf);
+    }
+    engine_.set_mixer_dsp(mixer, dsp_params_for(def));
+    return true;
 }
 
 bool ProjectState::set_bus_pan_live(const std::string& id, float pan) {
@@ -4173,7 +4231,9 @@ void ProjectState::materialise_buses() {
             // to and a stale flag would be signal in the phones with nothing
             // on screen to explain it.
             m->set_width(static_cast<audio::ChannelCount>(b.width));
+            m->set_pan(b.pan);
             m->set_pfl(false);
+            m->dsp().set_params(dsp_params_for(b));
         }
         wire_bus(b, r);
         created[b.id] = r;
@@ -4251,6 +4311,8 @@ std::optional<BusDef> ProjectState::create_bus(const json& spec) {
         m->set_gain_db(d.gain_db);
         m->set_mute(d.muted);
         m->set_width(static_cast<audio::ChannelCount>(d.width));
+        m->set_pan(d.pan);
+        m->dsp().set_params(dsp_params_for(d));
     }
     wire_bus(d, r);
     {
@@ -4281,6 +4343,7 @@ ProjectState::PatchBusResult ProjectState::patch_bus(const std::string& id,
     bool       found       = false;
     bool       needs_rewire = false;
     bool       pan_moved    = false;
+    bool       dsp_moved    = false;
     {
         std::lock_guard lock{mutex_};
         for (auto& b : buses_) {
@@ -4298,6 +4361,17 @@ ProjectState::PatchBusResult ProjectState::patch_bus(const std::string& id,
             if (patch.contains("pan")) {
                 const float p = std::clamp(patch.value("pan", b.pan), -1.0f, 1.0f);
                 if (p != b.pan) { b.pan = p; pan_moved = true; }
+            }
+            if (patch.contains("dsp") && patch["dsp"].is_object()) {
+                const auto& dsp = patch["dsp"];
+                const auto filter = [](const json& src, BusFilter& out) {
+                    if (!src.is_object()) return;
+                    out.freq_hz = src.value("freq", out.freq_hz);
+                    out.q       = std::clamp(src.value("q", out.q), 0.1f, 40.0f);
+                };
+                if (dsp.contains("hpf")) filter(dsp["hpf"], b.dsp.hpf);
+                if (dsp.contains("lpf")) filter(dsp["lpf"], b.dsp.lpf);
+                dsp_moved = true;
             }
             if (patch.contains("output") && patch["output"].is_object()) {
                 const auto& out  = patch["output"];
@@ -4344,6 +4418,9 @@ ProjectState::PatchBusResult ProjectState::patch_bus(const std::string& id,
             // Send gains only — a pan drag must not tear the routing down.
             apply_bus_pan(updated, routing);
         }
+        // Tone controls never touch routing: new coefficients into the strip's
+        // own slot and nothing else moves.
+        if (dsp_moved) engine_.set_mixer_dsp(routing.mixer, dsp_params_for(updated));
     }
     return PatchBusResult::Ok;
 }

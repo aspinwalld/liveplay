@@ -11,15 +11,13 @@
     Every cell is a knob and a typeable box, because an EQ set by ear and an EQ
     set from a spec sheet are both real jobs.
 
-    Shell until the DSP stage lands: the panel is dashed and labelled, and its
-    controls are disabled, so nothing here can be mistaken for something that
-    is processing audio.
+    The curve is live and includes the channel's high- and low-pass, which live
+    on the fader column but shape this same signal — an EQ display that ignored
+    them would be drawing a lie. The four band controls are still shells, so
+    the pending badge sits on them rather than on the whole panel.
   -->
-  <section class="eq det__panel det__panel--pending">
-    <h4 class="det__h">
-      {{ t('mixer.tabEq') }}
-      <span class="det__pending">{{ t('mixer.notImplemented') }}</span>
-    </h4>
+  <section class="eq det__panel">
+    <h4 class="det__h">{{ t('mixer.tabEq') }}</h4>
 
     <!-- Response curve. Flat, with a handle per band at its frequency —
          the shape the real curve will take, so the panel does not change
@@ -39,9 +37,23 @@
         class="eq__handle"
         :style="{ left: xPctFor(b.freq) + '%', background: handleColor(i) }"
       >{{ b.id }}</span>
+      <!-- The filters get markers too, so a corner in the curve can be traced
+           to the knob that put it there rather than looking like an EQ band
+           nobody moved. Only shown when the filter is in circuit. -->
+      <span
+        v-if="hpfIn"
+        class="eq__handle eq__handle--filter"
+        :style="{ left: xPctFor(bus!.dsp.hpf.freq) + '%' }"
+      >{{ t('mixer.hpf') }}</span>
+      <span
+        v-if="lpfIn"
+        class="eq__handle eq__handle--filter"
+        :style="{ left: xPctFor(bus!.dsp.lpf.freq) + '%' }"
+      >{{ t('mixer.lpf') }}</span>
     </div>
 
-    <div class="eq__grid-controls">
+    <div class="eq__grid-controls eq__grid-controls--pending">
+      <span class="eq__pending">{{ t('mixer.notImplemented') }}</span>
       <!-- Header row: the bands. -->
       <span class="eq__rowlabel"></span>
       <span v-for="b in bands" :key="'n' + b.id" class="eq__bandname">{{ b.id }}</span>
@@ -74,6 +86,16 @@
 import { computed } from 'vue';
 import KnobField from './KnobField.vue';
 import { METER_COLORS } from '~/composables/useOutputTarget';
+import type { Bus } from '~/types/project';
+import { HPF_PARKED_HZ, LPF_PARKED_HZ } from '~/types/project';
+import type { BiquadCoeffs } from '~/utils/filterResponse';
+import {
+  biquadHighpass, biquadLowpass, biquadPeaking, combinedMagnitudeDb,
+} from '~/utils/filterResponse';
+
+// The bus whose curve this is. Optional so the panel still renders (flat)
+// before the first bus fetch lands.
+const props = defineProps<{ bus?: Bus | null }>();
 
 const { t } = useLocalization();
 
@@ -97,10 +119,56 @@ const HI = Math.log10(20000);
 const xPctFor = (hz: number) => ((Math.log10(hz) - LO) / (HI - LO)) * 100;
 const yFor = (db: number) => 60 - (db / GRAPH_DB) * 60;
 
-// Flat, because every band is at 0 dB. Drawn as a polyline rather than a
-// straight line so the real response can replace the points and nothing else.
-const curvePoints = computed(() =>
-  Array.from({ length: 41 }, (_, i) => `${i * 10},${yFor(0)}`).join(' '));
+// The curve, including the channel's high- and low-pass.
+//
+// The filters live on the fader column, not in this panel, but they shape the
+// same signal and an EQ display that ignored them would be drawing a lie: turn
+// a 400 Hz high-pass in and the bottom of the band goes with it, whatever the
+// LF band says. Every section that touches the audio belongs in the picture.
+//
+// The maths mirrors the C++ engine (see utils/filterResponse.ts). It is a
+// second model of the same filters, so it is display-only and the two have to
+// be kept in step.
+const SAMPLE_RATE = 48000;
+
+const sections = computed<BiquadCoeffs[]>(() => {
+  const out: BiquadCoeffs[] = [];
+  const hpf = props.bus?.dsp?.hpf;
+  const lpf = props.bus?.dsp?.lpf;
+  // Parked at the end of its travel is out of circuit — the same rule the
+  // server applies when it decides whether to run the section at all.
+  if (hpf && hpf.freq > HPF_PARKED_HZ) {
+    out.push(biquadHighpass(hpf.freq, SAMPLE_RATE, hpf.q || 0.7071));
+  }
+  if (lpf && lpf.freq < LPF_PARKED_HZ) {
+    out.push(biquadLowpass(lpf.freq, SAMPLE_RATE, lpf.q || 0.7071));
+  }
+  for (const b of bands) {
+    if (b.gain !== 0) out.push(biquadPeaking(b.freq, SAMPLE_RATE, b.gain, b.q));
+  }
+  return out;
+});
+
+// Sampled along the same log axis the handles sit on, so a corner lands under
+// its knob rather than a few pixels off it.
+const CURVE_POINTS = 81;
+const curvePoints = computed(() => {
+  const secs = sections.value;
+  return Array.from({ length: CURVE_POINTS }, (_, i) => {
+    const x  = (i / (CURVE_POINTS - 1)) * 400;
+    const hz = Math.pow(10, LO + (i / (CURVE_POINTS - 1)) * (HI - LO));
+    const db = secs.length ? combinedMagnitudeDb(secs, hz, SAMPLE_RATE) : 0;
+    // Clamped to the drawn range: a 24 dB/octave skirt heads for -80 dB and
+    // would otherwise draw a vertical spike off the bottom of the box.
+    const clamped = Math.max(-GRAPH_DB, Math.min(GRAPH_DB, db));
+    return `${x.toFixed(1)},${yFor(clamped).toFixed(1)}`;
+  }).join(' ');
+});
+
+const hpfIn = computed(() =>
+  !!props.bus?.dsp?.hpf && props.bus.dsp.hpf.freq > HPF_PARKED_HZ);
+const lpfIn = computed(() =>
+  !!props.bus?.dsp?.lpf && props.bus.dsp.lpf.freq < LPF_PARKED_HZ);
 
 const handleColor = (i: number) =>
   [METER_COLORS.blue, METER_COLORS.green, METER_COLORS.yellow, METER_COLORS.red][i]
@@ -114,6 +182,28 @@ const handleColor = (i: number) =>
    see but not adjust is worse than one you have to scroll to. */
 .eq { min-height: 0; }
 .eq > *:not(.eq__graph) { flex: 0 0 auto; }
+
+/* The band controls are still shells; the curve above them is not. The dashed
+   frame is on the controls alone so the panel does not disown a display that
+   is telling the truth. */
+.eq__grid-controls--pending {
+  position: relative;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--border-radius-sm);
+  padding-top: 10px;
+}
+.eq__pending {
+  position: absolute;
+  top: 1px;
+  right: 4px;
+  font-size: 8px;
+  color: var(--color-text-disabled);
+}
+/* Filter markers read as fixtures rather than as a fifth and sixth band. */
+.eq__handle--filter {
+  background: var(--color-text-disabled);
+  opacity: 0.85;
+}
 
 /* EQ owns a full-height column of its own now, so the graph goes back to
    taking whatever the band controls below it do not. It was pinned to a

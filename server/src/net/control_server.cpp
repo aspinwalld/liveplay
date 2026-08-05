@@ -1609,6 +1609,12 @@ void ControlServer::install_routes() {
                         {"gainDb",   b.def.gain_db},
                         {"mute",     b.def.muted},
                         {"pan",      b.def.pan},
+                        {"dsp",      json{
+                            {"hpf", json{{"freq", b.def.dsp.hpf.freq_hz},
+                                         {"q",    b.def.dsp.hpf.q}}},
+                            {"lpf", json{{"freq", b.def.dsp.lpf.freq_hz},
+                                         {"q",    b.def.dsp.lpf.q}}},
+                        }},
                         // Live monitoring state, not part of the document —
                         // it comes from the strip, and a reload clears it.
                         {"pfl",      b.pfl},
@@ -1663,6 +1669,20 @@ void ControlServer::install_routes() {
             try {
                 auto j = json::parse(req.body);
                 if (!state_.set_bus_pan_live(id, j.value("pan", 0.0f)))
+                    return json_err(404, "not found");
+                return json_ok(json({{"ok", true}}));
+            } catch (const std::exception& e) { return json_err(400, e.what()); }
+        });
+
+    // Live tone controls while a filter knob is being dragged. Coefficients
+    // straight at the strip: no document write, no broadcast, no re-wire.
+    // Same shape and the same reason as the pan endpoint — a PATCH per drag
+    // event would rewrite the document and bounce the knob back to the stale
+    // value until the round trip landed.
+    CROW_ROUTE(app, "/api/buses/<string>/dsp").methods(crow::HTTPMethod::Post)
+        ([this](const crow::request& req, std::string id){
+            try {
+                if (!state_.set_bus_dsp_live(id, json::parse(req.body)))
                     return json_err(404, "not found");
                 return json_ok(json({{"ok", true}}));
             } catch (const std::exception& e) { return json_err(400, e.what()); }

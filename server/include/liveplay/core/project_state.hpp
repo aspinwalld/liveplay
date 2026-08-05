@@ -86,6 +86,28 @@ enum class BusOutputKind {
     Output,   // direct to a named logical output
 };
 
+// The strip's tone controls, as the project stores them.
+//
+// There is no separate in/out switch for the filters. A high-pass parked at
+// the bottom of its range and a low-pass parked at the top are out of circuit,
+// which is what the knob's origin already means on the surface and what a
+// console's "park it and forget it" position does. It also removes a control
+// that could disagree with the knob beside it.
+struct BusFilter {
+    float freq_hz = 0.0f;    // 0 = never set; falls back to the parked value
+    float q       = 0.70710678f;
+};
+
+struct BusDsp {
+    BusFilter hpf{20.0f};       // parked at the bottom: out of circuit
+    BusFilter lpf{20000.0f};    // parked at the top: out of circuit
+};
+
+// Where the filters sit when they are doing nothing. Shared with the client,
+// which draws the same parked positions on its knobs.
+inline constexpr float kHpfParkedHz = 20.0f;
+inline constexpr float kLpfParkedHz = 20000.0f;
+
 struct BusDef {
     std::string   id;
     std::string   display_name;
@@ -99,6 +121,7 @@ struct BusDef {
     // §2.5.3: pan belongs to a mono->stereo send, not to a strip, and a
     // stereo bus wants balance, which is deferred.
     float         pan        = 0.0f;
+    BusDsp        dsp;
     BusOutputKind output_kind = BusOutputKind::Master;
     std::string   output_target;        // bus id, or logical output name
     // System buses (Main, Monitor) are created implicitly and cannot be
@@ -491,6 +514,16 @@ public:
     // mute endpoints do. The client persists the final value with patch_bus
     // when the gesture settles.
     bool set_bus_pan_live(const std::string& id, float pan);
+
+    // Live tone controls, for the duration of a knob drag: pushes coefficients
+    // straight at the strip without writing the document or broadcasting, the
+    // same shape as set_bus_pan_live. The client PATCHes the settled value.
+    bool set_bus_dsp_live(const std::string& id, const json& dsp);
+
+    // Turn a bus's stored tone controls into engine parameters. Public because
+    // the shape of StripDspParams is the engine's, not the document's, and
+    // both the materialise path and the live path need the same translation.
+    static audio::StripDspParams dsp_params_for(const BusDef& bus);
 
     // ---- PFL -------------------------------------------------------------
     // Raise or lower pre-fade listen on a bus: a pre-fader, pre-mute tap into

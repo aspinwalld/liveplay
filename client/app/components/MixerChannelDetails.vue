@@ -51,7 +51,9 @@
            connection panels beneath. EQ and dynamics are side by side rather
            than stacked because stacking them made both too short to use. -->
       <div class="det__work">
-        <MixerEqPanel class="det__eq" />
+        <!-- The curve needs the bus: it draws the channel's high- and low-pass
+           alongside the EQ bands, and those live on the fader column. -->
+      <MixerEqPanel class="det__eq" :bus="bus" />
 
         <!-- Static height, packed as tight as the slots allow: the rack is a
              list of six things, not a workspace, so it should never take room

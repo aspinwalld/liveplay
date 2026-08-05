@@ -166,6 +166,26 @@ export interface BusOutput {
 }
 
 /**
+ * One filter block on a strip. There is no separate in/out switch: a high-pass
+ * parked at the bottom of its range and a low-pass parked at the top are out
+ * of circuit, which is what the knob's origin already means on the surface.
+ */
+export interface BusFilter {
+  freq: number;
+  q: number;
+}
+
+/** The strip's tone controls. EQ bands and dynamics join this as they land. */
+export interface BusDsp {
+  hpf: BusFilter;
+  lpf: BusFilter;
+}
+
+/** Where the filters sit when out of circuit. Must match the server's. */
+export const HPF_PARKED_HZ = 20;
+export const LPF_PARKED_HZ = 20000;
+
+/**
  * A bus is the user-facing mixer strip. Items and groups are assigned to one
  * via `busId` and carry no other routing; the bus alone decides where the
  * audio goes, and it is edited from the mixer rather than per item.
@@ -192,6 +212,8 @@ export interface Bus {
    * engine, never saved, and a reload clears it.
    */
   pfl: boolean;
+  /** The strip's tone controls: HPF and LPF today, EQ and dynamics to come. */
+  dsp: BusDsp;
   /**
    * Whether this bus actually reaches hardware. Not derivable from the output
    * name list: Monitor may be bound through settings.previewDevice, which is

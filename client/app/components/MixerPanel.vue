@@ -178,6 +178,7 @@ const masterBus = computed<Bus>(() => ({
   mute: false,
   pan: 0,
   pfl: false,
+  dsp: { hpf: { freq: 20, q: 0.7071 }, lpf: { freq: 20000, q: 0.7071 } },
   bound: true,
   system: true,
   output: { type: 'output', target: '' },

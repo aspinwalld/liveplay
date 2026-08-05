@@ -73,18 +73,25 @@
       >{{ t('mixer.pfl') }}</button>
     </div>
 
-    <!-- Filters. Shells until the DSP chain exists — dashed, and labelled, so
-         nothing here reads as a control that is doing something. -->
-    <div class="cf__filters cf__pending">
-      <span class="cf__pendinglabel">{{ t('mixer.notImplemented') }}</span>
+    <!-- Filters. Real: each knob parks at the end of its travel to go out of
+         circuit, which is what the origin already meant on the surface, so
+         there is no separate in/out switch to disagree with the knob beside
+         it. Double-click parks it. The label lights when it is in circuit. -->
+    <div class="cf__filters">
       <div class="cf__filterrow">
         <KnobField
-          :value="80" :min="20" :max="800" :origin="20"
-          :decimals="0" unit="Hz" :label="t('mixer.hpf')" :size="34" disabled
+          :value="hpfHz" :min="HPF_PARKED_HZ" :max="800" :origin="HPF_PARKED_HZ"
+          :decimals="0" unit="Hz" :label="t('mixer.hpf')" :size="34"
+          :class="{ 'cf__filter--in': hpfIn }"
+          :title="hpfIn ? t('mixer.hpf') : t('mixer.filterParked')"
+          @input="onHpf"
         />
         <KnobField
-          :value="18000" :min="1000" :max="20000" :origin="20000"
-          :decimals="0" unit="Hz" :label="t('mixer.lpf')" :size="34" disabled
+          :value="lpfHz" :min="1000" :max="LPF_PARKED_HZ" :origin="LPF_PARKED_HZ"
+          :decimals="0" unit="Hz" :label="t('mixer.lpf')" :size="34"
+          :class="{ 'cf__filter--in': lpfIn }"
+          :title="lpfIn ? t('mixer.lpf') : t('mixer.filterParked')"
+          @input="onLpf"
         />
       </div>
     </div>
@@ -111,6 +118,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { Bus } from '~/types/project';
+import { HPF_PARKED_HZ, LPF_PARKED_HZ } from '~/types/project';
 import CanvasFader from './CanvasFader.vue';
 import StereoMeter from './StereoMeter.vue';
 import MeterScale from './MeterScale.vue';
@@ -179,6 +187,7 @@ function onPan(v: number) {
 onBeforeUnmount(() => {
   if (settle) clearTimeout(settle);
   if (panSettle) clearTimeout(panSettle);
+  if (filtSettle) clearTimeout(filtSettle);
 });
 
 function onMute() {
@@ -193,6 +202,49 @@ function onMute() {
 function onPfl() {
   void server.setBusPfl(props.bus.id, !props.bus.pfl).catch(() => {});
 }
+
+// ---- Filters -------------------------------------------------------------
+// Same live-then-persist shape as the fader and the pan knob: the strip gets
+// new coefficients on every drag event over a strip-only call, and the bus is
+// written once the gesture settles. Binding straight to the bus would PATCH
+// and refetch per event, and the knob would fight the round-trip.
+const hpfHz    = ref(props.bus.dsp?.hpf?.freq ?? HPF_PARKED_HZ);
+const lpfHz    = ref(props.bus.dsp?.lpf?.freq ?? LPF_PARKED_HZ);
+let   filtHold = false;
+let   filtSettle: ReturnType<typeof setTimeout> | null = null;
+
+watch(() => props.bus.dsp, v => {
+  if (filtHold) return;
+  hpfHz.value = v?.hpf?.freq ?? HPF_PARKED_HZ;
+  lpfHz.value = v?.lpf?.freq ?? LPF_PARKED_HZ;
+}, { deep: true });
+
+// Parked at the end of its travel means out of circuit — the same rule the
+// server applies, so the lamp and the audio cannot disagree.
+const hpfIn = computed(() => hpfHz.value > HPF_PARKED_HZ);
+const lpfIn = computed(() => lpfHz.value < LPF_PARKED_HZ);
+
+function pushFilters() {
+  filtHold = true;
+  void server.setBusDsp(props.bus.id, {
+    hpf: { freq: hpfHz.value, q: props.bus.dsp?.hpf?.q ?? 0.7071 },
+    lpf: { freq: lpfHz.value, q: props.bus.dsp?.lpf?.q ?? 0.7071 },
+  }).catch(() => {});
+  if (filtSettle) clearTimeout(filtSettle);
+  filtSettle = setTimeout(() => {
+    filtSettle = null;
+    filtHold   = false;
+    emit('patch', props.bus.id, {
+      dsp: {
+        hpf: { freq: hpfHz.value, q: props.bus.dsp?.hpf?.q ?? 0.7071 },
+        lpf: { freq: lpfHz.value, q: props.bus.dsp?.lpf?.q ?? 0.7071 },
+      },
+    } as Partial<Bus>);
+  }, 250);
+}
+
+function onHpf(v: number) { hpfHz.value = v; pushFilters(); }
+function onLpf(v: number) { lpfHz.value = v; pushFilters(); }
 
 const gainLabel = computed(() =>
   gainDb.value <= -60 ? '-∞' : (gainDb.value > 0 ? '+' : '') + gainDb.value.toFixed(1));
@@ -309,13 +361,11 @@ const meterLabel = computed(() => {
   border: 1px dashed var(--color-border);
   border-radius: var(--border-radius-sm);
 }
-.cf__pending { position: relative; }
-.cf__pendinglabel {
-  font-size: 8px;
-  text-align: center;
-  color: var(--color-text-disabled);
-}
 .cf__filterrow { display: flex; justify-content: space-around; gap: 4px; }
+/* A filter in circuit says so. Parked at the end of its travel it is out, and
+   the only way to tell at a glance is the label — there is no in/out switch
+   to look at. */
+.cf__filter--in :deep(.kf__label) { color: var(--color-accent); }
 
 .cf__pan { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .cf__panlabel {
